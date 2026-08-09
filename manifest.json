@@ -1,0 +1,23 @@
+{
+  "name": "BusTech Engineering · PDI Road Test",
+  "short_name": "PDI Road Test",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f8fc",
+  "theme_color": "#0057B8",
+  "icons": [
+    {
+      "src": "bustech-logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "bustech-logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
