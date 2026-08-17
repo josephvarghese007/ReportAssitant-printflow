@@ -1,57 +1,159 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<meta name="theme-color" content="#0057B8">
-<title>BusTech Engineering · Road Test PDI</title>
-<link rel="icon" href="../bustech-logo.png" type="image/png">
-<link rel="stylesheet" href="./road-test.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes" />
+    <meta name="theme-color" content="#0057B8" />
+    <title>BusTech Engineering · Road Test</title>
+    <link rel="stylesheet" href="../style.css" />
+    <link rel="manifest" href="../manifest.json" />
+    <link rel="icon" href="../bustech-logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="../bustech-logo.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
 </head>
 <body>
-<header class="rt-header"><div class="rt-header-inner">
-<a class="brand" href="../"><img src="../bustech-logo.png" alt="BusTech Engineering"><div><strong>BusTech Engineering</strong><span>Road Test PDI</span></div></a>
-<div class="header-actions"><a class="icon-btn" href="../" aria-label="Back to dashboard">←</a><button class="icon-btn" id="themeBtn" type="button">☾</button></div>
-</div></header>
-<main class="rt-shell">
-<section class="session-card">
-<div class="section-title-row"><div><span class="eyebrow">ROAD TEST</span><h1>Level-2 Road Test Inspection</h1></div><span class="session-badge" id="sessionBadge">NEW</span></div>
-<div id="missingSession" class="notice hidden"><strong>Inspection information not found.</strong><span>Enter the vehicle information below, or return to the PDI Dashboard.</span></div>
-<div class="info-grid" id="inspectionInfo">
-<label>Inspection ID<input id="inspectionId" type="text" placeholder="PDI-2026-001"></label>
-<label>Registration Number<input id="registration" type="text" placeholder="KL-07-AB-1234"></label>
-<label>VIN / Chassis Number<input id="vin" type="text" placeholder="VIN / chassis number"></label>
-<label>Vehicle Model<input id="model" type="text" placeholder="Vehicle model"></label>
-<label>Customer / Company<input id="customer" type="text" placeholder="Customer / company"></label>
-<label>Inspector<input id="inspector" type="text" placeholder="Inspector name / ID"></label>
-<label>Date<input id="date" type="date"></label>
-<label>Location<input id="location" type="text" placeholder="Inspection location"></label>
-</div>
-<div class="info-actions"><button class="btn secondary" id="saveInfoBtn" type="button">Save Inspection Info</button><a class="btn ghost" href="../">← Back to PDI Dashboard</a></div>
-</section>
-<section class="progress-card">
-<div class="stats"><div><span>Total</span><strong id="totalCount">442</strong></div><div><span>Completed</span><strong id="completedCount">0</strong></div><div><span>Passed</span><strong class="pass-text" id="passedCount">0</strong></div><div><span>Failed</span><strong class="fail-text" id="failedCount">0</strong></div><div><span>Remaining</span><strong id="remainingCount">442</strong></div></div>
-<div class="progress-track"><div id="progressBar"></div></div><div class="progress-meta"><span id="progressText">0% complete</span><span id="autosaveText">Ready</span></div>
-</section>
-<section class="controls-card">
-<div class="controls-row">
-<label class="search-box">⌕<input id="searchInput" type="search" placeholder="Search check, PDC, category, method..." autocomplete="off"></label>
-<label class="select-box">Category<select id="categorySelect"></select></label>
-<label class="select-box">Status<select id="statusFilter"><option value="ALL">All checks</option><option value="PENDING">Unanswered</option><option value="PASS">Passed</option><option value="FAIL">Failed</option><option value="NA">Not Applicable</option></select></label>
-</div>
-<div class="category-strip" id="categoryStrip"></div>
-</section>
-<section class="checklist-card">
-<div class="category-heading"><div><span class="eyebrow" id="categoryCode">CATEGORY</span><h2 id="categoryTitle">VIN Registration Plate</h2><p id="categoryMeta"></p></div><div class="category-nav"><button class="btn secondary" id="prevCategory" type="button">← Previous</button><button class="btn primary" id="nextCategory" type="button">Next →</button></div></div>
-<div id="searchSummary" class="search-summary hidden"></div><div id="checkList" class="check-list"></div><div id="emptyState" class="empty hidden">No checks match the current filter.</div>
-</section>
-<section class="completion-card">
-<div><span class="eyebrow">FINAL SUMMARY</span><h2>Complete Road Test</h2><p>Review the counts before completing. Unanswered checks are never silently marked as passed.</p></div>
-<div class="summary-grid"><div><span>Passed</span><strong id="summaryPassed">0</strong></div><div><span>Failed</span><strong id="summaryFailed">0</strong></div><div><span>Not Applicable</span><strong id="summaryNA">0</strong></div><div><span>Unanswered</span><strong id="summaryUnanswered">442</strong></div></div>
-<button class="btn primary large" id="completeBtn" type="button">Complete Road Test</button>
-</section>
-</main>
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
-<dialog id="completeDialog"><div class="dialog-inner"><button class="dialog-close" id="closeDialog" type="button">×</button><span class="eyebrow">COMPLETION CHECK</span><h2>Finish Road Test?</h2><div id="dialogSummary"></div><p id="dialogWarning"></p><div class="dialog-actions"><button class="btn secondary" id="cancelComplete" type="button">Review</button><button class="btn primary" id="confirmComplete" type="button">Complete Road Test</button></div></div></dialog>
-<script src="./road-test-data.js"></script><script src="./road-test.js"></script>
-</body></html>
+
+    <!-- HEADER -->
+    <header class="app-header app-ui">
+        <div class="top-row">
+            <div class="brand">
+                <img src="../bustech-logo.png" alt="BusTech Engineering Logo" class="company-logo">
+                <div class="brand-text">
+                    <span class="app-name">Road Test</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <a href="../" title="Back to Static PDI" aria-label="Back to Static PDI"><i class="fas fa-arrow-left"></i></a>
+                <button onclick="scanQR()" title="Scan QR" aria-label="Scan QR code"><i class="fas fa-qrcode"></i></button>
+                <button onclick="confirmReset()" title="Reset Inspection" aria-label="Reset all inspection data"><i class="fas fa-undo"></i></button>
+                <button onclick="toggleDarkMode()" title="Theme" aria-label="Toggle theme"><i class="fas fa-moon"></i></button>
+            </div>
+        </div>
+        <div class="subtitle">
+            <div class="subtitle-text">
+                <i class="fas fa-road"></i>
+                Dynamic Road Test · Grouped Inspection
+            </div>
+            <div class="header-timer" id="headerTimer" title="Elapsed inspection time">
+                <i class="fas fa-stopwatch" id="timerIcon"></i>
+                <span id="timerDisplay">00:00:00</span>
+                <button type="button" class="btn-timer-toggle" id="timerControlBtn" onclick="toggleTimer()" aria-label="Pause timer">
+                    <i class="fas fa-pause"></i>
+                </button>
+                <button type="button" class="btn-timer-reset" id="timerResetBtn" onclick="resetTimer()" aria-label="Reset timer">
+                    <i class="fas fa-redo-alt"></i>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- STATS -->
+    <section class="stats-grid app-ui" id="statsGrid" aria-live="polite" role="status">
+        <div class="stat-item">
+            <div class="stat-number total" id="totalCount">0</div>
+            <div class="stat-label">Total</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-number passed" id="passedCount">0</div>
+            <div class="stat-label">Passed</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-number failed" id="failedCount">0</div>
+            <div class="stat-label">Failed</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-number pending" id="pendingCount">0</div>
+            <div class="stat-label">Pending</div>
+        </div>
+    </section>
+
+    <!-- INSPECTION INFO -->
+    <section class="inspection-info-section app-ui" id="inspectionInfoSection">
+        <div class="inspection-info-header" role="button" tabindex="0" onclick="toggleInspectionInfo()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleInspectionInfo();}">
+            <h2><i class="fas fa-clipboard-list"></i> Vehicle / Inspection Information</h2>
+            <i class="fas fa-chevron-down inspection-info-toggle" id="inspectionInfoToggle"></i>
+        </div>
+        <div class="inspection-info-body" id="inspectionInfoBody">
+            <div class="info-field">
+                <label for="infoInspectionId">Inspection ID</label>
+                <input type="text" id="infoInspectionId" readonly />
+            </div>
+            <div class="info-field">
+                <label for="infoRegNumber">Vehicle Registration Number</label>
+                <input type="text" id="infoRegNumber" placeholder="e.g. ABC-1234" />
+            </div>
+            <div class="info-field">
+                <label for="infoVin">VIN / Chassis Number</label>
+                <input type="text" id="infoVin" placeholder="e.g. 1HGBH41JXMN109186" />
+            </div>
+            <div class="info-field">
+                <label for="infoModel">Vehicle Model</label>
+                <input type="text" id="infoModel" placeholder="e.g. BusTech CDi" />
+            </div>
+            <div class="info-field">
+                <label for="infoCustomer">Customer / Company</label>
+                <input type="text" id="infoCustomer" placeholder="e.g. Transit Corp" />
+            </div>
+            <div class="info-field">
+                <label for="infoInspector">Inspector Name / ID</label>
+                <input type="text" id="infoInspector" placeholder="e.g. John Smith" />
+            </div>
+            <div class="info-field">
+                <label for="infoDate">Inspection Date</label>
+                <input type="date" id="infoDate" />
+            </div>
+            <div class="info-field">
+                <label for="infoLocation">Inspection Location</label>
+                <input type="text" id="infoLocation" placeholder="e.g. Brisbane Depot" />
+            </div>
+        </div>
+    </section>
+
+    <!-- TOOLBAR -->
+    <div class="toolbar app-ui">
+        <div class="search-wrap">
+            <i class="fas fa-search" aria-hidden="true"></i>
+            <input type="text" id="searchInput" placeholder="Search assemblies..." autocomplete="off" aria-label="Search assemblies" />
+        </div>
+        <div class="filter-tabs" id="filterTabs" role="tablist" aria-label="Filter inspection groups">
+            <button type="button" class="tab active" data-filter="all" aria-pressed="true">All</button>
+            <button type="button" class="tab" data-filter="pass" aria-pressed="false">Pass</button>
+            <button type="button" class="tab" data-filter="fail" aria-pressed="false">Fail</button>
+            <button type="button" class="tab" data-filter="pending" aria-pressed="false">Pending</button>
+        </div>
+    </div>
+
+    <!-- GROUP LIST -->
+    <div class="group-list app-ui" id="groupList"></div>
+
+    <!-- BOTTOM BAR -->
+    <div class="bottom-bar app-ui">
+        <button type="button" class="btn-outline" onclick="exportPDF()" aria-label="Export PDF"><i class="fas fa-file-pdf" aria-hidden="true"></i> PDF</button>
+        <input type="file" id="importJsonInput" accept=".json" onchange="importJSON(event)" />
+    </div>
+
+    <!-- TOAST & MODAL -->
+    <div class="toast-container app-ui" id="toastContainer" aria-live="polite" aria-atomic="true"></div>
+    <div class="modal-overlay app-ui" id="modalOverlay">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalMessage">
+            <h2 id="modalTitle">Confirm Fail</h2>
+            <p id="modalMessage">Marking as <strong>FAIL</strong>. Please ensure you capture a photo as evidence.</p>
+            <div class="modal-actions">
+                <button class="btn-outline" onclick="closeModal()">Cancel</button>
+                <button class="btn-danger" id="modalConfirmBtn">Confirm Fail</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- PRINT REPORT (hidden in normal view, shown only for print) -->
+    <div class="print-report" id="printReport"></div>
+
+    <!-- SCRIPTS -->
+    <script src="../inspection-engine.js"></script>
+    <script src="./road-test-data.js"></script>
+    <script src="./road-test.js"></script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 // ─── DATA ───
-const INSPECTION_DATA = [
+const STATIC_INSPECTION_DATA = [
     { "pdc": "SD-RT-IBC-PDI-VRP-001-001", "adc": "001-VIN Registration Plate-VRP", "sadc": "VIN Plate", "pldc": "VIN Plate", "picp": "VIN plate presence on chassis", "method": "Visual inspection", "spec": "VIN plate installed at designated location" },
     { "pdc": "SD-RT-IBC-PDI-VRP-001-002", "adc": "001-VIN Registration Plate-VRP", "sadc": "VIN Plate", "pldc": "VIN Plate", "picp": "VIN plate mounting security", "method": "Physical check", "spec": "Plate firmly fixed, no looseness" },
     { "pdc": "SD-RT-IBC-PDI-VRP-001-003", "adc": "001-VIN Registration Plate-VRP", "sadc": "VIN Plate", "pldc": "Rivet/Fastener", "picp": "VIN plate rivet condition", "method": "Visual inspection", "spec": "All rivets properly fixed" },
@@ -551,43 +551,15 @@ let isTimerRunning = false;
 
 // ─── SAVE / AUTO-SAVE ───
 function saveToLocalStorage() {
-    try {
-        localStorage.setItem('pdi-inspection-items', JSON.stringify(inspectionItems));
-    } catch (e) {
-        console.error('Failed to save inspection items', e);
+    const ok = InspectionEngine.safeSetJSON('pdi-inspection-items', inspectionItems, () => {
         showToast('⚠️ Storage full. Some photo attachments may be too large.', 'error');
-    }
+    });
+    if (!ok) console.error('Failed to save inspection items');
 }
 
 // ─── IMAGE COMPRESSION ───
 function compressImage(file, callback) {
-    const reader = new FileReader();
-    reader.onload = function (event) {
-        const img = new Image();
-        img.onload = function () {
-            const canvas = document.createElement('canvas');
-            let width = img.width;
-            let height = img.height;
-            const maxDim = 1024; // standard dimension for reporting
-            if (width > maxDim || height > maxDim) {
-                if (width > height) {
-                    height = Math.round((height * maxDim) / width);
-                    width = maxDim;
-                } else {
-                    width = Math.round((width * maxDim) / height);
-                    height = maxDim;
-                }
-            }
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0, width, height);
-            const compressedBase64 = canvas.toDataURL('image/jpeg', 0.7);
-            callback(compressedBase64);
-        };
-        img.src = event.target.result;
-    };
-    reader.readAsDataURL(file);
+    InspectionEngine.compressImage(file, { maxDimension: 1024, quality: 0.7 }, callback);
 }
 
 // ─── INIT ───
@@ -630,7 +602,7 @@ function init() {
 }
 
 function startFreshSession() {
-    inspectionItems = INSPECTION_DATA.map((item, index) => ({
+    inspectionItems = STATIC_INSPECTION_DATA.map((item, index) => ({
         ...item,
         id: index,
         status: '',
@@ -668,56 +640,18 @@ function confirmReset() {
 
 // ─── GROUP DATA ───
 function buildGroups() {
-    const groups = {};
-    inspectionItems.forEach(item => {
-        const key = item.adc;
-        if (!groups[key]) {
-            groups[key] = {
-                adc: key,
-                items: [],
-                passCount: 0,
-                failCount: 0,
-                pendCount: 0
-            };
-        }
-        groups[key].items.push(item);
-    });
-    Object.values(groups).forEach(g => {
-        g.passCount = g.items.filter(i => i.status === 'PASS').length;
-        g.failCount = g.items.filter(i => i.status === 'FAIL').length;
-        g.pendCount = g.items.filter(i => i.status === '').length;
-    });
-    return Object.values(groups);
+    return InspectionEngine.buildGroups(inspectionItems, 'adc');
 }
 
+// Any-match visibility per group (a group with mixed statuses shows under every matching filter).
 function getFilteredGroups() {
-    let groups = buildGroups();
-    if (currentFilter === 'pass') {
-        groups = groups.filter(g => g.passCount > 0 && g.failCount === 0 && g.pendCount === 0);
-    } else if (currentFilter === 'fail') {
-        groups = groups.filter(g => g.failCount > 0);
-    } else if (currentFilter === 'pending') {
-        groups = groups.filter(g => g.pendCount > 0 && g.failCount === 0 && g.passCount === 0);
-    }
-    if (searchQuery.trim()) {
-        const q = searchQuery.trim().toLowerCase();
-        groups = groups.filter(g =>
-            g.adc.toLowerCase().includes(q) ||
-            g.items.some(i => [i.picp, i.pdc, i.sadc, i.pldc, i.method, i.spec]
-                .some(value => String(value).toLowerCase().includes(q)))
-        );
-    }
-    return groups;
+    const groups = buildGroups();
+    return InspectionEngine.getFilteredGroups(groups, currentFilter, searchQuery, ['picp', 'pdc', 'sadc', 'pldc', 'method', 'spec']);
 }
 
 // ─── RENDER GROUPS ───
 function escapeHtml(value = '') {
-    return String(value)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
+    return InspectionEngine.escapeHtml(value);
 }
 
 function renderGroups() {
@@ -925,22 +859,20 @@ function updateRemarks(id, value) {
 
 // ─── STATS ───
 function updateStats() {
-    const total = inspectionItems.length;
-    const passed = inspectionItems.filter(i => i.status === 'PASS').length;
-    const failed = inspectionItems.filter(i => i.status === 'FAIL').length;
-    const pending = total - passed - failed;
-    document.getElementById('totalCount').textContent = total;
-    document.getElementById('passedCount').textContent = passed;
-    document.getElementById('failedCount').textContent = failed;
-    document.getElementById('pendingCount').textContent = pending;
+    const counters = InspectionEngine.computeCounters(inspectionItems);
+    document.getElementById('totalCount').textContent = counters.total;
+    document.getElementById('passedCount').textContent = counters.passed;
+    document.getElementById('failedCount').textContent = counters.failed;
+    document.getElementById('pendingCount').textContent = counters.pending;
 }
 
 // ─── EVENTS ───
 function setupEventListeners() {
     const searchInput = document.getElementById('searchInput');
+    const debouncedRender = InspectionEngine.debounce(renderGroups, 250);
     searchInput.addEventListener('input', (e) => {
         searchQuery = e.target.value;
-        renderGroups();
+        debouncedRender();
     });
 
     document.querySelectorAll('.filter-tabs .tab').forEach(tab => {
