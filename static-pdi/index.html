@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes" />
     <meta name="theme-color" content="#0057B8" />
-    <title>BusTech Engineering · Dynamic Road Test</title>
+    <title>BusTech Engineering · Static PDI Inspection</title>
     <link rel="stylesheet" href="../style.css" />
     <link rel="manifest" href="../manifest.json" />
     <link rel="icon" href="../bustech-logo.png" type="image/png" />
@@ -23,30 +23,30 @@
             <div class="brand">
                 <img src="../bustech-logo.png" alt="BusTech Logo" class="company-logo" />
                 <div class="brand-text">
-                    <span class="app-name">Road Test</span>
-                    <span class="app-badge">Dynamic Driving Verification</span>
+                    <span class="app-name">Static PDI</span>
+                    <span class="app-badge">Workshop Inspection</span>
                 </div>
             </div>
             <div class="header-actions">
                 <a href="../" title="Back to Master Launcher" aria-label="Open Master Page"><i class="fas fa-home"></i></a>
                 <button type="button" onclick="openQrScanner()" title="Scan VIN Barcode/QR" aria-label="Scan QR code"><i class="fas fa-qrcode"></i></button>
                 <button type="button" onclick="openCategoryDrawer()" title="Assembly Jump Drawer" aria-label="Open Assembly Categories"><i class="fas fa-list-ul"></i></button>
-                <button type="button" onclick="confirmReset()" title="Reset Road Test" aria-label="Reset road test inspection"><i class="fas fa-undo"></i></button>
+                <button type="button" onclick="confirmReset()" title="Reset Inspection" aria-label="Reset all inspection data"><i class="fas fa-undo"></i></button>
                 <button type="button" onclick="toggleDarkMode()" title="Theme" aria-label="Toggle dark/light theme"><i class="fas fa-moon"></i></button>
             </div>
         </div>
         <div class="subtitle">
             <div class="subtitle-text">
-                <i class="fas fa-road"></i>
-                Track &amp; Highway Dynamic Drive
+                <i class="fas fa-clipboard-check"></i>
+                Chassis Level-2 · Pre-Delivery Inspection
             </div>
-            <div class="header-timer" id="headerTimer" title="Elapsed Road Test Duration">
+            <div class="header-timer" id="headerTimer" title="Countdown Timer">
                 <i class="fas fa-stopwatch" id="timerIcon"></i>
-                <span id="timerDisplay">00:00:00</span>
-                <button type="button" class="btn-timer-toggle" id="timerControlBtn" onclick="toggleTimer()" aria-label="Pause or start stopwatch">
+                <span id="timerDisplay">02:00:00</span>
+                <button type="button" class="btn-timer-toggle" id="timerControlBtn" onclick="toggleTimer()" aria-label="Pause or start timer">
                     <i class="fas fa-pause"></i>
                 </button>
-                <button type="button" class="btn-timer-reset" id="timerResetBtn" onclick="resetTimer()" aria-label="Reset stopwatch">
+                <button type="button" class="btn-timer-reset" id="timerResetBtn" onclick="resetTimer()" aria-label="Reset timer">
                     <i class="fas fa-redo-alt"></i>
                 </button>
             </div>
@@ -78,15 +78,15 @@
         </div>
     </section>
 
-    <!-- ─── VEHICLE & ROAD TEST METADATA ─── -->
+    <!-- ─── VEHICLE & INSPECTION METADATA ─── -->
     <section class="inspection-info-section app-ui" id="inspectionInfoSection">
         <div class="inspection-info-header" role="button" tabindex="0" onclick="toggleInspectionInfo()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleInspectionInfo();}">
-            <h2><i class="fas fa-tachometer-alt"></i> Vehicle &amp; Road Test Data</h2>
+            <h2><i class="fas fa-truck-moving"></i> Vehicle &amp; Inspection Data</h2>
             <i class="fas fa-chevron-down inspection-info-toggle" id="inspectionInfoToggle"></i>
         </div>
         <div class="inspection-info-body collapsed" id="inspectionInfoBody">
             <div class="info-field">
-                <label for="infoInspectionId">Test ID</label>
+                <label for="infoInspectionId">Inspection ID</label>
                 <input type="text" id="infoInspectionId" readonly />
             </div>
             <div class="info-field">
@@ -106,16 +106,16 @@
                 <input type="text" id="infoCustomer" placeholder="e.g. Transport for NSW" />
             </div>
             <div class="info-field">
-                <label for="infoInspector">Test Driver / Inspector</label>
-                <input type="text" id="infoInspector" placeholder="e.g. Mark Stevens" />
+                <label for="infoInspector">Inspector Name</label>
+                <input type="text" id="infoInspector" placeholder="e.g. David Miller" />
             </div>
             <div class="info-field">
-                <label for="infoDate">Test Date</label>
+                <label for="infoDate">Inspection Date</label>
                 <input type="date" id="infoDate" />
             </div>
             <div class="info-field">
-                <label for="infoLocation">Track / Road Route</label>
-                <input type="text" id="infoLocation" placeholder="e.g. Proving Ground &amp; M1 Highway" />
+                <label for="infoLocation">Depot / Bay</label>
+                <input type="text" id="infoLocation" placeholder="e.g. Gold Coast Facility - Bay 3" />
             </div>
         </div>
     </section>
@@ -124,10 +124,10 @@
     <div class="toolbar app-ui">
         <div class="search-wrap">
             <i class="fas fa-search" aria-hidden="true"></i>
-            <input type="text" id="searchInput" placeholder="Search dynamic test points, NVH, braking, steering..." autocomplete="off" aria-label="Search checkpoints" />
+            <input type="text" id="searchInput" placeholder="Search checkpoints, assemblies, specs..." autocomplete="off" aria-label="Search checkpoints" />
         </div>
         <div class="filter-row">
-            <div class="filter-tabs" id="filterTabs" role="tablist" aria-label="Filter road test groups">
+            <div class="filter-tabs" id="filterTabs" role="tablist" aria-label="Filter inspection groups">
                 <button type="button" class="tab active" data-filter="all" aria-pressed="true">All</button>
                 <button type="button" class="tab" data-filter="pass" aria-pressed="false">Pass</button>
                 <button type="button" class="tab" data-filter="fail" aria-pressed="false">Fail</button>
@@ -151,9 +151,9 @@
 
     <!-- ─── CATEGORY JUMP DRAWER ─── -->
     <div class="drawer-overlay app-ui" id="drawerOverlay" onclick="closeCategoryDrawer()"></div>
-    <aside class="drawer app-ui" id="categoryDrawer" aria-label="Road Test Category Menu">
+    <aside class="drawer app-ui" id="categoryDrawer" aria-label="Assembly Category Jump Menu">
         <div class="drawer-header">
-            <h3><i class="fas fa-layer-group"></i> Dynamic Test Assemblies</h3>
+            <h3><i class="fas fa-layer-group"></i> Assemblies</h3>
             <button type="button" class="drawer-close" onclick="closeCategoryDrawer()" aria-label="Close drawer">&times;</button>
         </div>
         <div class="drawer-body" id="drawerBody"></div>
@@ -161,22 +161,22 @@
 
     <!-- ─── BOTTOM ACTION BAR ─── -->
     <footer class="bottom-bar app-ui">
-        <button type="button" class="btn-outline" onclick="openSignOffModal()" aria-label="Sign Off Road Test">
+        <button type="button" class="btn-outline" onclick="openSignOffModal()" aria-label="Sign Off Inspection">
             <i class="fas fa-signature" aria-hidden="true"></i> Sign Off &amp; Signatures
         </button>
-        <button type="button" class="btn-primary" onclick="exportPDF()" aria-label="Generate Road Test PDF Report">
-            <i class="fas fa-file-pdf" aria-hidden="true"></i> Road Test PDF Report
+        <button type="button" class="btn-primary" onclick="exportPDF()" aria-label="Generate PDF Report">
+            <i class="fas fa-file-pdf" aria-hidden="true"></i> Generate PDF Report
         </button>
     </footer>
 
-    <!-- ─── FAIL CONFIRMATION MODAL WITH ROAD TEST DEFECT PILLS & VOICE ─── -->
+    <!-- ─── FAIL CONFIRMATION MODAL WITH DEFECT PILLS & VOICE ─── -->
     <div class="modal-overlay app-ui" id="modalOverlay">
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalMessage">
-            <h2 id="modalTitle">Record Driving Defect</h2>
-            <div id="modalMessage">Marking dynamic checkpoint as <strong>FAIL</strong>.</div>
+            <h2 id="modalTitle">Confirm Fail</h2>
+            <div id="modalMessage">Marking as <strong>FAIL</strong>. Please capture photo evidence and detail the defect.</div>
             <div class="modal-actions">
                 <button type="button" class="btn-outline" onclick="closeModal()">Cancel</button>
-                <button type="button" class="btn-danger" id="modalConfirmBtn">Confirm Defect</button>
+                <button type="button" class="btn-danger" id="modalConfirmBtn">Confirm Fail</button>
             </div>
         </div>
     </div>
@@ -184,24 +184,24 @@
     <!-- ─── SIGN-OFF & DIGITAL SIGNATURE MODAL ─── -->
     <div class="modal-overlay app-ui" id="signOffModalOverlay">
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="signOffTitle">
-            <h2 id="signOffTitle"><i class="fas fa-file-signature"></i> Road Test Sign-Off</h2>
+            <h2 id="signOffTitle"><i class="fas fa-file-signature"></i> Final Inspection Sign-Off</h2>
             <p style="font-size:0.88rem;color:var(--text-secondary);">
-                Electronic sign-off for dynamic track and road certification.
+                Provide electronic signatures for the official PDF inspection record.
             </p>
 
-            <!-- Test Driver Signature -->
+            <!-- Inspector Signature -->
             <div class="signature-card">
                 <div class="signature-card-header">
-                    <span><i class="fas fa-user-check"></i> Test Driver Signature</span>
+                    <span><i class="fas fa-user-check"></i> Inspector Signature</span>
                     <button type="button" class="btn-sig-clear" onclick="clearInspectorSignature()">Clear</button>
                 </div>
                 <canvas id="inspectorSigCanvas" class="signature-canvas"></canvas>
             </div>
 
-            <!-- Vehicle Release Supervisor Signature -->
+            <!-- Supervisor Signature -->
             <div class="signature-card">
                 <div class="signature-card-header">
-                    <span><i class="fas fa-user-shield"></i> Vehicle Release Supervisor</span>
+                    <span><i class="fas fa-user-shield"></i> Supervisor / Quality Assurance</span>
                     <button type="button" class="btn-sig-clear" onclick="clearSupervisorSignature()">Clear</button>
                 </div>
                 <canvas id="supervisorSigCanvas" class="signature-canvas"></canvas>
@@ -219,7 +219,7 @@
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="qrTitle">
             <h2 id="qrTitle"><i class="fas fa-barcode"></i> Vehicle VIN &amp; Registration Scanner</h2>
             <p style="font-size:0.85rem;color:var(--text-secondary);">
-                Scan the vehicle VIN barcode or QR code.
+                Point your camera at the vehicle VIN barcode or QR code.
             </p>
             <div style="width:100%;max-height:240px;background:#000;border-radius:var(--radius-sm);overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center;">
                 <video id="qrVideo" style="width:100%;height:100%;object-fit:cover;" playsinline></video>
@@ -248,7 +248,6 @@
 
     <!-- ─── SCRIPTS ─── -->
     <script src="../inspection-engine.js"></script>
-    <script src="./road-test-data.js"></script>
-    <script src="./road-test.js"></script>
+    <script src="script.js"></script>
 </body>
 </html>

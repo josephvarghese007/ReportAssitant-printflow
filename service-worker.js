@@ -1,4 +1,4 @@
-const CACHE_NAME = 'report-assistant-v3';
+const CACHE_NAME = 'report-assistant-v4';
 const APP_SHELL = [
   './','./index.html','./style.css','./script.js','./inspection-engine.js','./bustech-logo.png','./manifest.json',
   './road-test/','./road-test/index.html','./road-test/road-test.css','./road-test/road-test.js','./road-test/road-test-data.js'

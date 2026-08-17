@@ -1,28 +1,27 @@
-// Road Test module - configuration/data-driven instance of the same inspection engine used by Static PDI.
-// Mirrors script.js's structure/UX (accordion groups, stats, filters, modal/toast, timer, print report)
-// but is driven by roadTestChecklist (road-test-data.js) and uses its own 'rt-' localStorage namespace.
-
-// ─── DATA / CONFIG ───
-const ROAD_TEST_CONFIG = {
-    storagePrefix: 'rt-',
-    checklistVersion: (typeof CHECKLIST_VERSION !== 'undefined' ? CHECKLIST_VERSION : 'unknown'),
-    highRiskCategories: [
-        '007-Braking  System Assembly-BSA',
-        '005-Steering System-RHD-SSR',
-        '014-Safety & Control Systems-SCS'
-    ],
-    randomEvidenceRate: 0.06,
-    reportTitle: 'ROAD TEST INSPECTION REPORT'
-};
+// ═══════════════════════════════════════════════════════════════
+// BUSTECH ENGINEERING · DYNAMIC ROAD TEST CONTROLLER
+// High-Speed, Track & Proving Ground Dynamic Verification Suite
+// ═══════════════════════════════════════════════════════════════
 
 // ─── STATE ───
 let inspectionItems = [];
 let currentFilter = 'all';
 let searchQuery = '';
 let currentlyOpenGroup = null;
+let autoAdvanceEnabled = true;
 let modalPreviouslyFocused = null;
-let challengeIds = new Set();
 
+let inspectorSigPad = null;
+let supervisorSigPad = null;
+let signatures = {
+    inspector: null,
+    supervisor: null,
+    signedAt: null
+};
+
+let qrStream = null;
+
+// ─── INSPECTION METADATA ───
 let inspectionMeta = {
     inspectionId: '',
     registration: '',
@@ -41,6 +40,19 @@ const timer = InspectionEngine.createTimer({
     onTick: ({ displayMs }) => updateTimerDisplay(displayMs)
 });
 
+const ROAD_TEST_DEFECT_TAGS = [
+    'Braking Pull / Shudder',
+    'Steering Drift / Vibration',
+    'Transmission Jerk / Slipping',
+    'Excessive Powertrain NVH',
+    'Turbo Boost Lag / Abnormal Whine',
+    'Suspension Knock / Bottoming',
+    'Driveline Resonance at Speed',
+    'Dashboard Warning Light Active',
+    'Post-Drive Fluid Leakage Detected',
+    'Engine Temperature Elevated Under Load'
+];
+
 function generateInspectionId() {
     const now = new Date();
     const dateStr = now.getFullYear().toString() +
@@ -50,7 +62,7 @@ function generateInspectionId() {
     return 'RT-' + dateStr + '-' + seq;
 }
 
-// ─── META ───
+// ─── META PERSISTENCE ───
 function loadInspectionMeta() {
     const saved = InspectionEngine.safeGetJSON('rt-inspection-meta', null);
     if (saved && typeof saved === 'object') {
@@ -102,53 +114,63 @@ function setupMetaListeners() {
     });
 }
 
-let inspectionInfoOpen = true;
+let inspectionInfoOpen = false;
 function toggleInspectionInfo() {
     inspectionInfoOpen = !inspectionInfoOpen;
     const body = document.getElementById('inspectionInfoBody');
     const toggle = document.getElementById('inspectionInfoToggle');
-    if (body) body.style.display = inspectionInfoOpen ? 'grid' : 'none';
-    if (toggle) toggle.style.transform = inspectionInfoOpen ? 'rotate(180deg)' : 'rotate(0)';
+    if (body) {
+        if (inspectionInfoOpen) body.classList.remove('collapsed');
+        else body.classList.add('collapsed');
+    }
+    if (toggle) {
+        if (inspectionInfoOpen) toggle.classList.add('open');
+        else toggle.classList.remove('open');
+    }
 }
 
-// ─── SAVE / STORAGE ───
+// ─── LOCAL STORAGE ───
 function saveToLocalStorage() {
     InspectionEngine.safeSetJSON('rt-inspection-items', inspectionItems, () => {
-        showToast('⚠️ Storage full. Some photo attachments may be too large.', 'error');
+        showToast('⚠️ Storage quota warning - some photos may be large', 'error');
     });
 }
 
-function saveChallengeIds() {
-    InspectionEngine.safeSetJSON('rt-challenge-ids', Array.from(challengeIds));
-}
-
 function compressImage(file, callback) {
-    InspectionEngine.compressImage(file, { maxDimension: 900, quality: 0.6 }, callback);
+    InspectionEngine.compressImage(file, { maxDimension: 1024, quality: 0.7 }, callback);
 }
 
-// ─── INIT ───
+// ─── INITIALIZATION ───
 function init() {
     initTheme();
     setupEventListeners();
     setupMetaListeners();
     loadInspectionMeta();
 
+
+    const savedAutoAdvance = localStorage.getItem('rt-auto-advance');
+    if (savedAutoAdvance !== null) {
+        autoAdvanceEnabled = savedAutoAdvance === 'true';
+        updateAutoAdvanceButton();
+    }
+
+    const savedSignatures = InspectionEngine.safeGetJSON('rt-signatures', null);
+    if (savedSignatures) signatures = savedSignatures;
+
     const savedItems = InspectionEngine.safeGetJSON('rt-inspection-items', null);
-    const savedChallenges = InspectionEngine.safeGetJSON('rt-challenge-ids', null);
     if (Array.isArray(savedItems) && savedItems.length > 0) {
+        timer.pause();
         openModal('Resume Road Test?', `
-            <p>We found an in-progress Road Test inspection from your previous session.</p>
-            <p style="margin-top:8px">Would you like to <strong>Resume</strong> it or <strong>Start Fresh</strong>?</p>
+            <p>We found an in-progress Road Test session from your previous run.</p>
+            <p style="margin-top:8px;color:var(--text-secondary);">Would you like to <strong>Resume</strong> or <strong>Start Fresh</strong>?</p>
         `, () => {
             inspectionItems = savedItems;
-            challengeIds = new Set(Array.isArray(savedChallenges) ? savedChallenges : []);
-            timer.start(timer.load());
             renderGroups();
             updateStats();
-            auditLog.push('RESUME', {});
-            showToast('📂 Previous Road Test session restored', 'success');
+            timer.resume();
+            showToast('📂 Road Test session resumed', 'success');
         }, {
-            confirmText: 'Resume',
+            confirmText: 'Resume Session',
             cancelText: 'Start Fresh',
             onCancel: () => startFreshSession()
         });
@@ -159,14 +181,13 @@ function init() {
 }
 
 function startFreshSession() {
-    inspectionItems = roadTestChecklist.map((item, index) => ({
+    const rawChecklist = (typeof roadTestChecklist !== 'undefined') ? roadTestChecklist : [];
+    inspectionItems = rawChecklist.map((item, index) => ({
         ...item,
         id: index,
         status: '',
         photo: null,
         remarks: '',
-        evidenceRequired: false,
-        evidenceCaptured: false,
         history: []
     }));
     inspectionMeta = {
@@ -179,31 +200,31 @@ function startFreshSession() {
         date: new Date().toISOString().slice(0, 10),
         location: ''
     };
-    // Random evidence challenge is generated once per inspection and persisted so refresh doesn't reshuffle it.
-    const allIds = inspectionItems.map((i) => i.id);
-    challengeIds = new Set(InspectionEngine.pickRandomChallengeIds(allIds, ROAD_TEST_CONFIG.randomEvidenceRate, inspectionMeta.inspectionId));
-    saveChallengeIds();
-
+    signatures = { inspector: null, supervisor: null, signedAt: null };
+    localStorage.removeItem('rt-signatures');
+    localStorage.removeItem('rt-pause-logs');
     populateMetaFields();
     saveInspectionMeta();
-    saveToLocalStorage();
     timer.resetTimer();
-    auditLog.push('START', { inspectionId: inspectionMeta.inspectionId });
+    timer.start();
+    saveToLocalStorage();
     renderGroups();
     updateStats();
+    auditLog.clear();
+    auditLog.push('ROAD_TEST_START', { inspectionId: inspectionMeta.inspectionId });
 }
 
 function confirmReset() {
     openModal('Reset Road Test?', `
-        <p>Are you sure you want to reset all Road Test checkpoints, photos, and remarks?</p>
-        <p style="color:var(--danger);margin-top:8px;">⚠️ This action cannot be undone unless you have exported your data.</p>
+        <p>Are you sure you want to reset all road test checkpoints, photos, and remarks?</p>
+        <p style="color:var(--danger);margin-top:8px;font-weight:600;">⚠️ This action cannot be undone.</p>
     `, () => {
         startFreshSession();
-        showToast('↩️ Road Test reset successful', 'info');
+        showToast('↩️ Road test reset to fresh session', 'info');
     }, { confirmText: 'Reset All', cancelText: 'Cancel' });
 }
 
-// ─── GROUP DATA (shared engine - any-match filter visibility) ───
+// ─── GROUP DATA ───
 function buildGroups() {
     return InspectionEngine.buildGroups(inspectionItems, 'adc');
 }
@@ -222,64 +243,81 @@ function renderGroups() {
     const container = document.getElementById('groupList');
     const groups = getFilteredGroups();
 
+    if (groups.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <i class="fas fa-road"></i>
+                <h3>No dynamic test checkpoints found</h3>
+                <p>Try adjusting your search query or filter tab.</p>
+            </div>
+        `;
+        return;
+    }
+
     container.innerHTML = groups.map((group) => {
-        const isOpen = currentlyOpenGroup === group.adc;
         const total = group.items.length;
         const pct = total > 0 ? Math.round((group.passCount / total) * 100) : 0;
-        const fgClass = group.failCount > 0 ? 'fg-fail' : (pct === 100 ? 'fg-pass' : 'fg-partial');
+        let fgClass = 'fg';
+        if (pct === 100) fgClass += '';
+        else if (group.failCount > 0) fgClass += ' fg-fail';
+        else fgClass += ' fg-partial';
+
         const circumference = 2 * Math.PI * 18;
-        const offset = circumference * (1 - pct / 100);
+        const offset = circumference - (pct / 100) * circumference;
+        const isOpen = currentlyOpenGroup === group.adc;
 
         const itemsHtml = isOpen ? group.items.map((item) => {
+            const isPass = item.status === 'PASS';
             const isFail = item.status === 'FAIL';
-            const reason = InspectionEngine.evidenceReasonFor(item, ROAD_TEST_CONFIG, challengeIds);
-            const showEvidence = isFail || item.evidenceRequired || !!item.photo;
-            const evidenceTagHtml = item.evidenceRequired
-                ? `<span class="stat-chip fail-chip" title="Evidence required (${escapeHtml(reason || 'RANDOM')})"><i class="fas fa-camera" aria-hidden="true"></i> Evidence required</span>`
-                : '';
+            const showEvidence = isFail || item.photo || item.remarks;
+
             return `
-                <div class="checklist-item">
-                    <div class="item-main">
-                        <div class="item-pdc">${escapeHtml(item.pdc)} ${evidenceTagHtml}</div>
-                        <div class="item-question">${escapeHtml(item.picp)}</div>
-                        <div class="item-detail">
-                            <span>Method: ${escapeHtml(item.method)}</span>
-                            <span>Spec: ${escapeHtml(item.spec)}</span>
+                <div class="item-row" id="item-row-${item.id}">
+                    <div class="item-info">
+                        <div class="item-id">${escapeHtml(item.pdc)} · <span style="color:var(--text-secondary)">${escapeHtml(item.sadc || '')}</span></div>
+                        <div class="item-title">${escapeHtml(item.picp)}</div>
+                        <div class="item-spec"><i class="fas fa-tachometer-alt" style="font-size:0.75rem;opacity:0.7;"></i> ${escapeHtml(item.spec)}</div>
+                        <div class="item-evidence ${showEvidence ? 'visible' : ''}">
+                            <div class="photo-fail-area">
+                                <label for="photo-${item.id}" title="Capture road test photo">
+                                    <i class="fas fa-camera"></i>
+                                    <span>${item.photo ? 'Retake Photo' : 'Add Photo'}</span>
+                                </label>
+                                <input type="file" id="photo-${item.id}" accept="image/*" capture="environment" onchange="handlePhoto(${item.id}, this)" />
+                                <img class="photo-preview-fail ${item.photo ? 'visible' : ''}" id="preview-${item.id}" src="${item.photo || ''}" alt="Evidence photo" />
+                            </div>
+                            <div class="evidence-remarks-wrap">
+                                <textarea class="evidence-remarks" id="remarks-${item.id}" placeholder="Add driving notes, noise RPM, test speed..." oninput="updateRemarks(${item.id}, this.value)">${escapeHtml(item.remarks || '')}</textarea>
+                                <button type="button" class="btn-mic-inline" title="Dictate dynamic notes" onclick="dictateForRemarks(${item.id})">
+                                    <i class="fas fa-microphone"></i>
+                                </button>
+                            </div>
                         </div>
-                        ${showEvidence ? `
-                        <div class="evidence-section">
-                            <label class="photo-upload-label" for="photo-${item.id}"><i class="fas fa-camera"></i> ${item.photo ? 'Replace' : 'Add'} evidence photo</label>
-                            <input type="file" id="photo-${item.id}" accept="image/*" capture="environment" onchange="handlePhoto(${item.id}, this)" />
-                            <img class="photo-preview-fail ${item.photo ? 'visible' : ''}" id="preview-${item.id}" src="${item.photo || ''}" alt="evidence" loading="lazy" />
-                        </div>
-                        <textarea class="evidence-remarks" placeholder="Add remarks, defect details, or test notes..." oninput="updateRemarks(${item.id}, this.value)">${escapeHtml(item.remarks || '')}</textarea>
-                        ` : ''}
                     </div>
                     <div class="item-actions">
-                        <button type="button" class="status-btn btn-pass ${item.status === 'PASS' ? 'active' : ''}" onclick="setStatus(${item.id}, 'PASS')" aria-pressed="${item.status === 'PASS'}" aria-label="Mark ${escapeHtml(item.picp)} as pass">
-                            <i class="fas fa-check" aria-hidden="true"></i>
+                        <button type="button" class="status-btn btn-pass ${isPass ? 'active' : ''}" onclick="setStatus(${item.id}, 'PASS')" aria-pressed="${isPass}" aria-label="Mark ${escapeHtml(item.picp)} as pass">
+                            <i class="fas fa-check"></i>
                         </button>
                         <button type="button" class="status-btn btn-fail ${isFail ? 'active' : ''}" onclick="setStatus(${item.id}, 'FAIL')" aria-pressed="${isFail}" aria-label="Mark ${escapeHtml(item.picp)} as fail">
-                            <i class="fas fa-times" aria-hidden="true"></i>
+                            <i class="fas fa-times"></i>
                         </button>
                     </div>
                 </div>
             `;
         }).join('') : '';
 
-        const contentId = `group-content-${group.adc.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
         return `
-            <div class="group-card">
-                <div class="group-header" role="button" tabindex="0" aria-expanded="${isOpen}" aria-controls="${contentId}" onclick="toggleGroup('${group.adc}')" onkeydown="handleGroupKeyDown(event, '${group.adc}')">
+            <div class="group-card" id="group-card-${escapeHtml(group.adc).replace(/[^a-zA-Z0-9_-]/g, '-')}">
+                <div class="group-header" role="button" tabindex="0" onclick="toggleGroup('${escapeHtml(group.adc)}')">
                     <div class="group-info">
                         <div class="group-title">
-                            ${group.adc}
-                            <span class="badge">${group.items.length}</span>
+                            ${escapeHtml(group.adc)}
+                            <span class="badge">${group.items.length} dynamic tests</span>
                         </div>
                         <div class="group-meta">
-                            <span class="stat-chip pass-chip"><i class="fas fa-check-circle" aria-hidden="true"></i> ${group.passCount}</span>
-                            <span class="stat-chip fail-chip"><i class="fas fa-times-circle" aria-hidden="true"></i> ${group.failCount}</span>
-                            <span class="stat-chip pend-chip"><i class="fas fa-minus-circle" aria-hidden="true"></i> ${group.pendCount}</span>
+                            <span class="stat-chip pass-chip"><i class="fas fa-check-circle"></i> ${group.passCount}</span>
+                            <span class="stat-chip fail-chip"><i class="fas fa-times-circle"></i> ${group.failCount}</span>
+                            <span class="stat-chip pend-chip"><i class="fas fa-circle-notch"></i> ${group.pendCount}</span>
                         </div>
                     </div>
                     <div class="group-progress">
@@ -300,128 +338,604 @@ function renderGroups() {
 }
 
 function toggleGroup(adc) {
-    currentlyOpenGroup = currentlyOpenGroup === adc ? null : adc;
+    currentlyOpenGroup = (currentlyOpenGroup === adc) ? null : adc;
     renderGroups();
 }
 
-function handleGroupKeyDown(event, adc) {
-    if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        toggleGroup(adc);
-    }
-}
-
-// ─── STATUS / EVIDENCE WORKFLOW ───
-function setStatus(id, status) {
-    const item = inspectionItems.find((i) => i.id === id);
+// ─── STATUS UPDATES & GUIDED FLOW ───
+function setStatus(id, targetStatus) {
+    const item = inspectionItems.find(i => i.id === id);
     if (!item) return;
 
-    if (status === 'PASS' && item.status === 'PASS') status = '';
-    else if (status === 'FAIL' && item.status === 'FAIL') status = '';
-
-    if (!status) {
-        applyStatus(item, '');
+    if (targetStatus === 'FAIL' && item.status !== 'FAIL') {
+        openFailModal(item);
         return;
     }
 
-    const reason = status === 'FAIL' ? 'FAIL' : InspectionEngine.evidenceReasonFor({ ...item, status }, ROAD_TEST_CONFIG, challengeIds);
+    let nextStatus = targetStatus;
+    if (item.status === targetStatus) nextStatus = '';
 
-    if (reason) {
-        let pendingPhoto = null;
-        const reasonText = {
-            FAIL: 'Evidence is mandatory for failed checkpoints.',
-            HIGH_RISK: 'This is a high-risk checkpoint - evidence is required even though it passed.',
-            RANDOM: 'This checkpoint was randomly selected for an evidence integrity check.'
-        }[reason];
-        const modalHtml = `
-            <div>Mark <strong>${escapeHtml(item.picp)}</strong> as <strong>${status}</strong>.</div>
-            <div style="margin-top:8px;color:var(--text-secondary,inherit)">${escapeHtml(reasonText)}</div>
-            <div style="margin-top:8px">
-                <label for="modal-photo-input" class="photo-upload-label">Upload evidence photo<span style="color:var(--danger)"> *</span></label>
-                <input type="file" id="modal-photo-input" accept="image/*" capture="environment" />
-                <div><img id="modal-photo-preview" class="photo-preview-fail" src="" alt="evidence preview" style="display:none;margin-top:8px;max-width:160px;"/></div>
-            </div>
-            <div style="margin-top:8px">
-                <textarea id="modal-remarks" placeholder="Add remarks (optional)" style="width:100%;min-height:80px;border-radius:8px;border:1px solid var(--border);padding:8px;font:inherit"></textarea>
-            </div>
-        `;
-        auditLog.push('EVIDENCE_REQUIRED', { itemId: item.id, reason });
-        openModal(`Confirm ${status === 'FAIL' ? 'Fail' : 'Pass'}`, modalHtml, () => {
-            item.evidenceRequired = true;
-            if (pendingPhoto) {
-                item.photo = pendingPhoto;
-                item.evidenceCaptured = true;
-                auditLog.push('EVIDENCE_CAPTURED', { itemId: item.id, reason, timestamp: Date.now() });
-            }
-            const modalRemarks = document.getElementById('modal-remarks');
-            if (modalRemarks) item.remarks = modalRemarks.value;
-            applyStatus(item, status, reason);
-        }, {
-            requirePhoto: true,
-            onPendingPhoto: (base64) => { pendingPhoto = base64; },
-            onCancel: () => { pendingPhoto = null; }
-        });
-        return;
-    }
-
-    applyStatus(item, status, null);
+    applyStatus(item, nextStatus);
 }
 
-function applyStatus(item, status, reason) {
-    if (item.status && item.status !== status) {
-        if (!item.history) item.history = [];
-        item.history.push({ status: item.status, timestamp: new Date().toISOString(), remark: item.remarks || '', photo: item.photo || null });
-    }
+function applyStatus(item, status) {
     item.status = status;
-    if (status) {
-        auditLog.push('ANSWER_CHECK', { itemId: item.id, result: status });
-        if (status === 'FAIL') auditLog.push('FAIL_RECORDED', { itemId: item.id });
-    }
-    timer.markActivity();
     saveToLocalStorage();
     renderGroups();
     updateStats();
-    const msg = status === 'PASS' ? '✅ Marked PASS' : status === 'FAIL' ? '❌ Marked FAIL' : '↩️ Status cleared';
-    const type = status === 'PASS' ? 'success' : status === 'FAIL' ? 'error' : 'info';
-    if (status === 'FAIL') showToast('⚠️ Failed! Evidence photo captured.', 'error');
-    else showToast(msg, type);
+
+    auditLog.push('ROAD_TEST_CHECK', { id: item.id, pdc: item.pdc, status });
+
+    if (status === 'PASS') {
+        showToast(`✅ Passed: ${item.picp}`, 'success');
+        if (autoAdvanceEnabled) advanceToNextPending(item.id);
+    } else if (status === 'FAIL') {
+        showToast(`❌ Failed: ${item.picp}`, 'error');
+        if (autoAdvanceEnabled) advanceToNextPending(item.id);
+    } else {
+        showToast('↩️ Status cleared', 'info');
+    }
 }
 
+function openFailModal(item) {
+    let pendingPhoto = null;
+    const defectTagsHtml = ROAD_TEST_DEFECT_TAGS.map(tag =>
+        `<button type="button" class="defect-tag-pill" onclick="appendDefectTag('${escapeHtml(tag)}')">${escapeHtml(tag)}</button>`
+    ).join('');
+
+    const modalContent = `
+        <div style="font-size:0.95rem;margin-bottom:8px;">
+            Dynamic Test: <strong>${escapeHtml(item.picp)}</strong> (<span style="font-family:monospace">${escapeHtml(item.pdc)}</span>)
+        </div>
+        <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:10px;">
+            Target Spec: ${escapeHtml(item.spec)}
+        </div>
+
+        <label style="font-size:0.82rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Quick Road Test Fault:</label>
+        <div class="defect-tags-container" id="modalDefectTags">
+            ${defectTagsHtml}
+        </div>
+
+        <div style="margin-top:10px;position:relative;">
+            <label for="modalFailRemarks" style="font-size:0.82rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Driving Observations / Fault Details:</label>
+            <div style="position:relative;margin-top:4px;">
+                <textarea id="modalFailRemarks" class="evidence-remarks" style="min-height:75px;" placeholder="Describe speed, gear, RPM, noise frequency or driving symptom...">${escapeHtml(item.remarks || '')}</textarea>
+                <button type="button" class="btn-mic-inline" id="modalMicBtn" title="Voice dictation" onclick="dictateForModal()">
+                    <i class="fas fa-microphone"></i>
+                </button>
+            </div>
+        </div>
+
+        <div style="margin-top:12px;">
+            <label class="photo-fail-area">
+                <label for="modalPhotoInput" style="cursor:pointer;">
+                    <i class="fas fa-camera"></i> Capture Fault Photo / Gauge
+                </label>
+                <input type="file" id="modalPhotoInput" accept="image/*" capture="environment" />
+            </label>
+            <img id="modalPhotoPreview" class="photo-preview-fail" style="display:none;margin-top:8px;max-width:180px;height:auto;" alt="Defect preview" />
+        </div>
+    `;
+
+    openModal('Record Driving Defect', modalContent, () => {
+        const remarksEl = document.getElementById('modalFailRemarks');
+        if (remarksEl) item.remarks = remarksEl.value;
+        if (pendingPhoto) item.photo = pendingPhoto;
+        applyStatus(item, 'FAIL');
+    }, {
+        confirmText: 'Confirm Defect (FAIL)',
+        cancelText: 'Cancel'
+    });
+
+    setTimeout(() => {
+        const photoInput = document.getElementById('modalPhotoInput');
+        const preview = document.getElementById('modalPhotoPreview');
+        if (photoInput) {
+            photoInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                compressImage(file, (base64) => {
+                    pendingPhoto = base64;
+                    if (preview) {
+                        preview.src = base64;
+                        preview.style.display = 'block';
+                    }
+                });
+            });
+        }
+    }, 50);
+}
+
+function appendDefectTag(tag) {
+    const textarea = document.getElementById('modalFailRemarks');
+    if (!textarea) return;
+    if (textarea.value.trim().length > 0) {
+        textarea.value = textarea.value.trim() + '; ' + tag;
+    } else {
+        textarea.value = tag;
+    }
+}
+
+// ─── AUTO-ADVANCE & NEXT PENDING ───
+function toggleAutoAdvance() {
+    autoAdvanceEnabled = !autoAdvanceEnabled;
+    localStorage.setItem('rt-auto-advance', autoAdvanceEnabled ? 'true' : 'false');
+    updateAutoAdvanceButton();
+    showToast(autoAdvanceEnabled ? '⏩ Auto-advance enabled' : '⏸️ Auto-advance disabled', 'info');
+}
+
+function updateAutoAdvanceButton() {
+    const btn = document.getElementById('btnAutoAdvance');
+    if (!btn) return;
+    if (autoAdvanceEnabled) {
+        btn.classList.add('active');
+        btn.innerHTML = '<i class="fas fa-step-forward"></i> Auto-Advance (ON)';
+    } else {
+        btn.classList.remove('active');
+        btn.innerHTML = '<i class="fas fa-pause"></i> Auto-Advance (OFF)';
+    }
+}
+
+function advanceToNextPending(currentId) {
+    const nextItem = InspectionEngine.findNextPendingItem(inspectionItems, currentId);
+    if (!nextItem) {
+        showToast('🎉 All road test checkpoints verified!', 'success');
+        return;
+    }
+    currentlyOpenGroup = nextItem.adc;
+    renderGroups();
+    setTimeout(() => {
+        const row = document.getElementById(`item-row-${nextItem.id}`);
+        if (row) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            row.classList.add('focused');
+            setTimeout(() => row.classList.remove('focused'), 1800);
+        }
+    }, 80);
+}
+
+function jumpToNextPending() {
+    const nextItem = InspectionEngine.findNextPendingItem(inspectionItems, null);
+    if (!nextItem) {
+        showToast('✨ All dynamic checkpoints completed! Ready for sign-off.', 'success');
+        return;
+    }
+    currentlyOpenGroup = nextItem.adc;
+    renderGroups();
+    setTimeout(() => {
+        const row = document.getElementById(`item-row-${nextItem.id}`);
+        if (row) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            row.classList.add('focused');
+            setTimeout(() => row.classList.remove('focused'), 2000);
+        }
+    }, 100);
+}
+
+// ─── CATEGORY JUMP DRAWER ───
+function openCategoryDrawer() {
+    renderCategoryDrawer();
+    document.getElementById('drawerOverlay').classList.add('open');
+    document.getElementById('categoryDrawer').classList.add('open');
+}
+
+function closeCategoryDrawer() {
+    document.getElementById('drawerOverlay').classList.remove('open');
+    document.getElementById('categoryDrawer').classList.remove('open');
+}
+
+function renderCategoryDrawer() {
+    const body = document.getElementById('drawerBody');
+    const groups = buildGroups();
+    body.innerHTML = groups.map((g) => {
+        const total = g.items.length;
+        const done = g.passCount + g.failCount;
+        const pct = Math.round((done / total) * 100);
+        return `
+            <div class="drawer-item" onclick="jumpToGroup('${escapeHtml(g.adc)}')">
+                <div>
+                    <div class="drawer-item-title">${escapeHtml(g.adc)}</div>
+                    <div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px;">
+                        ${g.passCount} Pass · ${g.failCount} Fail · ${g.pendCount} Pending
+                    </div>
+                </div>
+                <div style="font-weight:700;font-size:0.85rem;color:${pct === 100 ? 'var(--success)' : 'var(--primary)'}">${pct}%</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function jumpToGroup(adc) {
+    currentlyOpenGroup = adc;
+    closeCategoryDrawer();
+    renderGroups();
+    setTimeout(() => {
+        const groupEl = document.getElementById(`group-card-${adc.replace(/[^a-zA-Z0-9_-]/g, '-')}`);
+        if (groupEl) groupEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
+}
+
+// ─── PHOTO & REMARKS ───
 function handlePhoto(id, input) {
     const file = input.files[0];
     if (!file) return;
     compressImage(file, (compressedBase64) => {
-        const item = inspectionItems.find((i) => i.id === id);
+        const item = inspectionItems.find(i => i.id === id);
         if (!item) return;
         item.photo = compressedBase64;
-        item.evidenceCaptured = true;
-        auditLog.push('EVIDENCE_CAPTURED', { itemId: item.id, timestamp: Date.now() });
         saveToLocalStorage();
         renderGroups();
-        showToast('📸 Evidence photo compressed & saved', 'success');
+        showToast('📸 Road test evidence attached', 'success');
+        auditLog.push('ATTACH_PHOTO', { id: item.id, pdc: item.pdc });
     });
 }
 
-function updateRemarks(id, value) {
-    const item = inspectionItems.find((i) => i.id === id);
+function updateRemarks(id, val) {
+    const item = inspectionItems.find(i => i.id === id);
     if (!item) return;
-    item.remarks = value;
+    item.remarks = val;
     saveToLocalStorage();
 }
 
-// ─── STATS ───
+// ─── VOICE DICTATION ───
+let inlineVoiceDictation = null;
+function dictateForRemarks(id) {
+    const textarea = document.getElementById(`remarks-${id}`);
+    if (!textarea) return;
+
+    if (!inlineVoiceDictation) {
+        inlineVoiceDictation = InspectionEngine.createVoiceDictation({
+            onResult: (text) => {
+                textarea.value = (textarea.value.trim() ? textarea.value.trim() + ' ' : '') + text;
+                updateRemarks(id, textarea.value);
+            },
+            onError: (err) => showToast(`Speech error: ${err}`, 'error')
+        });
+    }
+
+    if (!inlineVoiceDictation.isSupported) {
+        showToast('Microphone dictation not supported in this browser.', 'error');
+        return;
+    }
+    inlineVoiceDictation.toggle();
+    showToast('🎙️ Dictate driving observations...', 'info');
+}
+
+let modalVoiceDictation = null;
+function dictateForModal() {
+    const textarea = document.getElementById('modalFailRemarks');
+    const micBtn = document.getElementById('modalMicBtn');
+    if (!textarea) return;
+
+    if (!modalVoiceDictation) {
+        modalVoiceDictation = InspectionEngine.createVoiceDictation({
+            onResult: (text) => {
+                textarea.value = (textarea.value.trim() ? textarea.value.trim() + ' ' : '') + text;
+            },
+            onStateChange: (isListening) => {
+                if (micBtn) {
+                    if (isListening) micBtn.classList.add('recording');
+                    else micBtn.classList.remove('recording');
+                }
+            },
+            onError: (err) => showToast(`Speech error: ${err}`, 'error')
+        });
+    }
+
+    if (!modalVoiceDictation.isSupported) {
+        showToast('Microphone dictation not supported.', 'error');
+        return;
+    }
+    modalVoiceDictation.toggle();
+}
+
+// ─── STATS & LIVE HUD ───
 function updateStats() {
     const counters = InspectionEngine.computeCounters(inspectionItems);
     document.getElementById('totalCount').textContent = counters.total;
     document.getElementById('passedCount').textContent = counters.passed;
     document.getElementById('failedCount').textContent = counters.failed;
     document.getElementById('pendingCount').textContent = counters.pending;
+
+    const fill = document.getElementById('overallProgressFill');
+    if (fill) {
+        const pct = counters.total > 0 ? ((counters.completed / counters.total) * 100).toFixed(1) : 0;
+        fill.style.width = `${pct}%`;
+    }
+}
+
+// ─── DIGITAL SIGNATURES ───
+function openSignOffModal() {
+    saveInspectionMeta();
+    document.getElementById('signOffModalOverlay').classList.add('open');
+    setTimeout(() => {
+        if (!inspectorSigPad) {
+            const inspCanvas = document.getElementById('inspectorSigCanvas');
+            inspectorSigPad = InspectionEngine.createSignaturePad(inspCanvas);
+        }
+        if (!supervisorSigPad) {
+            const supCanvas = document.getElementById('supervisorSigCanvas');
+            supervisorSigPad = InspectionEngine.createSignaturePad(supCanvas);
+        }
+        if (inspectorSigPad) inspectorSigPad.resize();
+        if (supervisorSigPad) supervisorSigPad.resize();
+    }, 100);
+}
+
+function closeSignOffModal() {
+    document.getElementById('signOffModalOverlay').classList.remove('open');
+}
+
+function clearInspectorSignature() {
+    if (inspectorSigPad) inspectorSigPad.clear();
+}
+
+function clearSupervisorSignature() {
+    if (supervisorSigPad) supervisorSigPad.clear();
+}
+
+function saveSignaturesAndExport() {
+    const inspData = inspectorSigPad ? inspectorSigPad.toDataURL() : null;
+    const supData = supervisorSigPad ? supervisorSigPad.toDataURL() : null;
+
+    signatures = {
+        inspector: inspData,
+        supervisor: supData,
+        signedAt: new Date().toISOString()
+    };
+    InspectionEngine.safeSetJSON('rt-signatures', signatures);
+    closeSignOffModal();
+    showToast('✍️ Road test signatures recorded', 'success');
+    exportPDF();
+}
+
+// ─── CAMERA QR / BARCODE SCANNER ───
+function openQrScanner() {
+    document.getElementById('qrScannerModalOverlay').classList.add('open');
+    const video = document.getElementById('qrVideo');
+    const status = document.getElementById('qrScannerStatus');
+
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+            .then((stream) => {
+                qrStream = stream;
+                video.srcObject = stream;
+                video.play();
+                status.textContent = 'Camera active. Point at barcode/QR code.';
+            })
+            .catch(() => {
+                status.textContent = 'Camera unavailable. Use manual input below.';
+            });
+    } else {
+        status.textContent = 'Camera access not supported on this device.';
+    }
+}
+
+function closeQrScanner() {
+    if (qrStream) {
+        qrStream.getTracks().forEach(track => track.stop());
+        qrStream = null;
+    }
+    document.getElementById('qrScannerModalOverlay').classList.remove('open');
+}
+
+function applyManualVin() {
+    const input = document.getElementById('manualVinInput');
+    if (!input || !input.value.trim()) return;
+    const val = input.value.trim();
+    inspectionMeta.vin = val;
+    populateMetaFields();
+    saveInspectionMeta();
+    closeQrScanner();
+    showToast(`🚘 VIN recorded: ${val}`, 'success');
+}
+
+// ─── PDF PRINT REPORT GENERATION ───
+function exportPDF() {
+    saveInspectionMeta();
+    if (!inspectionMeta.inspectionId) {
+        showToast('⚠️ Please ensure inspection info is entered', 'error');
+        return;
+    }
+
+    const reportContainer = document.getElementById('printReport');
+    reportContainer.innerHTML = generatePrintReport();
+
+    window.print();
+    showToast('📄 Road Test PDF print dialog launched', 'info');
+}
+
+function generatePrintReport() {
+    const allGroups = buildGroups();
+    const counters = InspectionEngine.computeCounters(inspectionItems);
+    const failedItems = inspectionItems.filter(i => i.status === 'FAIL');
+
+    let finalResult = 'DYNAMIC TEST PASSED';
+    let finalResultClass = 'pass';
+    if (counters.failed > 0) {
+        finalResult = 'DYNAMIC DEFECTS FOUND (REJECTED)';
+        finalResultClass = 'fail';
+    } else if (counters.pending > 0) {
+        finalResult = 'INCOMPLETE ROAD TEST';
+        finalResultClass = 'pending';
+    }
+
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+
+    let metaItemsHtml = '';
+    if (inspectionMeta.inspectionId) metaItemsHtml += `<div class="report-meta-item"><span>Inspection ID:</span><strong>${escapeHtml(inspectionMeta.inspectionId)}</strong></div>`;
+    if (inspectionMeta.registration) metaItemsHtml += `<div class="report-meta-item"><span>Registration No:</span><strong>${escapeHtml(inspectionMeta.registration)}</strong></div>`;
+    if (inspectionMeta.vin) metaItemsHtml += `<div class="report-meta-item"><span>VIN / Chassis:</span><strong>${escapeHtml(inspectionMeta.vin)}</strong></div>`;
+    if (inspectionMeta.model) metaItemsHtml += `<div class="report-meta-item"><span>Vehicle Model:</span><strong>${escapeHtml(inspectionMeta.model)}</strong></div>`;
+    if (inspectionMeta.customer) metaItemsHtml += `<div class="report-meta-item"><span>Customer / Fleet:</span><strong>${escapeHtml(inspectionMeta.customer)}</strong></div>`;
+    if (inspectionMeta.inspector) metaItemsHtml += `<div class="report-meta-item"><span>Inspector:</span><strong>${escapeHtml(inspectionMeta.inspector)}</strong></div>`;
+    metaItemsHtml += `<div class="report-meta-item"><span>Date &amp; Time:</span><strong>${escapeHtml(inspectionMeta.date || dateStr)} ${timeStr}</strong></div>`;
+    if (inspectionMeta.location) metaItemsHtml += `<div class="report-meta-item"><span>Location / Route:</span><strong>${escapeHtml(inspectionMeta.location)}</strong></div>`;
+
+    // Calculate Active Time
+    const timerState = timer.load() || { startedAt: Date.now(), pausedAccumMs: 0 };
+    const totalActiveSecs = Math.floor((Date.now() - timerState.startedAt - (timerState.pausedAccumMs || 0)) / 1000);
+    const activeMins = Math.floor(totalActiveSecs / 60);
+    const activeSecs = totalActiveSecs % 60;
+    metaItemsHtml += `<div class="report-meta-item"><span>Total Active Time:</span><strong>${activeMins}m ${activeSecs}s</strong></div>`;
+
+    let html = `
+        <div class="report-page">
+            <!-- Header Block -->
+            <div class="report-header-block">
+                <div class="report-header-text">
+                    <h1>BUSTECH ENGINEERING · ROAD TEST REPORT</h1>
+                    <p>Dynamic Track &amp; Highway Certification</p>
+                </div>
+                <img src="../bustech-logo.png" alt="BusTech Logo" class="report-logo" style="mix-blend-mode:multiply;"/>
+            </div>
+
+            <!-- Vehicle & Meta Information -->
+            <div class="report-meta-grid">
+                ${metaItemsHtml}
+            </div>
+
+            <!-- Summary Scorecard -->
+            <div class="report-summary-bar">
+                <div class="report-summary-card">Total Checkpoints: <strong>${counters.total}</strong></div>
+                <div class="report-summary-card pass">PASSED: <strong>${counters.passed}</strong></div>
+                <div class="report-summary-card fail">FAILED: <strong>${counters.failed}</strong></div>
+                <div class="report-summary-card">OVERALL: <strong style="color:${finalResultClass === 'pass' ? '#10B981' : '#EF4444'}">${finalResult}</strong></div>
+            </div>
+    `;
+
+    // Road Test Defects Box
+    if (failedItems.length > 0) {
+        html += `
+            <div class="report-defect-box">
+                <h3>⚠️ DYNAMIC DEFECT SUMMARY (${failedItems.length} Failures Detected During Road Drive)</h3>
+                <table class="report-table">
+                    <thead>
+                        <tr>
+                            <th>Code</th>
+                            <th>Assembly</th>
+                            <th>Dynamic Test Point</th>
+                            <th>Driving Observations &amp; Fault Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        failedItems.forEach((f) => {
+            html += `
+                <tr>
+                    <td style="font-family:monospace;font-weight:700;">${escapeHtml(f.pdc)}</td>
+                    <td>${escapeHtml(f.adc)}</td>
+                    <td><strong>${escapeHtml(f.picp)}</strong></td>
+                    <td style="color:#B91C1C;font-weight:600;">${escapeHtml(f.remarks || 'No driving notes recorded')}</td>
+                </tr>
+            `;
+        });
+        html += `</tbody></table></div>`;
+    }
+
+    // Full Checklist Table
+    html += `<div class="report-section-title">Detailed Road Test Checklist</div>`;
+    for (const group of allGroups) {
+        html += `
+            <div style="margin-bottom:10px;page-break-inside:avoid;">
+                <div style="font-weight:700;font-size:8.5pt;background:#F1F5F9;padding:4px 8px;border:1px solid #CBD5E1;border-bottom:none;">
+                    ${escapeHtml(group.adc)} (${group.passCount} Pass / ${group.failCount} Fail / ${group.pendCount} Pending)
+                </div>
+                <table class="report-table" style="margin-bottom:8px;">
+                    <thead>
+                        <tr>
+                            <th style="width:18%;">Code</th>
+                            <th style="width:38%;">Dynamic Test Point &amp; Spec</th>
+                            <th style="width:12%;">Method</th>
+                            <th style="width:10%;">Status</th>
+                            <th style="width:22%;">Driving Observations</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        for (const item of group.items) {
+            const st = item.status || 'PENDING';
+            const badgeClass = item.status === 'PASS' ? 'pass' : (item.status === 'FAIL' ? 'fail' : 'pending');
+            html += `
+                <tr>
+                    <td style="font-family:monospace;">${escapeHtml(item.pdc)}</td>
+                    <td><strong>${escapeHtml(item.picp)}</strong><br/><span style="color:#64748B;">Spec: ${escapeHtml(item.spec)}</span></td>
+                    <td>${escapeHtml(item.method)}</td>
+                    <td><span class="report-badge ${badgeClass}">${st}</span></td>
+                    <td>${escapeHtml(item.remarks || '-')}</td>
+                </tr>
+            `;
+        }
+        html += `</tbody></table></div>`;
+    }
+
+    // Evidence Gallery
+    const itemsWithPhotos = inspectionItems.filter(i => i.photo);
+    if (itemsWithPhotos.length > 0) {
+        html += `
+            <div class="report-section-title" style="page-break-before:always;">Road Test Photo &amp; Diagnostic Evidence</div>
+            <div class="report-evidence-grid">
+        `;
+        for (const item of itemsWithPhotos) {
+            html += `
+                <div class="report-evidence-card">
+                    <img src="${item.photo}" alt="Evidence for ${escapeHtml(item.picp)}" />
+                    <div style="font-size:8pt;">
+                        <strong>${escapeHtml(item.pdc)}</strong>: ${escapeHtml(item.picp)}
+                        <br/>
+                        <span class="report-badge ${item.status === 'FAIL' ? 'fail' : 'pass'}">${item.status}</span>
+                        ${item.remarks ? `<br/><em>${escapeHtml(item.remarks)}</em>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+        html += `</div>`;
+    }
+
+    // Session Activity Logs
+    const pauseLogs = InspectionEngine.safeGetJSON('rt-pause-logs', []);
+    if (pauseLogs.length > 0) {
+        html += `<div class="report-section-title">Session Activity &amp; Pause Logs</div>`;
+        html += `<table class="report-table" style="width:100%;max-width:500px;margin-bottom:12px;">
+                    <thead><tr><th>Time</th><th>Action / Event</th></tr></thead>
+                    <tbody>`;
+        pauseLogs.forEach(log => {
+            html += `<tr><td>${log.timestamp}</td><td>${log.action}</td></tr>`;
+        });
+        html += `</tbody></table>`;
+    }
+
+    // Electronic Signatures Block
+    html += `
+        <div class="report-signatures" style="display:flex;align-items:flex-end;justify-content:space-between;border-top:2px solid #E2E8F0;padding-top:16px;">
+            <div style="display:flex;gap:40px;">
+                <div class="report-signature-block">
+                    ${signatures.inspector ? `<img src="${signatures.inspector}" alt="Inspector Signature" />` : '<div style="height:50px;"></div>'}
+                    <div><strong>Driver / Inspector Sign-Off:</strong> ${escapeHtml(inspectionMeta.inspector || 'Certified Inspector')}</div>
+                    <div style="font-size:7.5pt;color:#64748B;">I hereby certify that all dynamic checkpoints have been individually evaluated.</div>
+                </div>
+                <div class="report-signature-block">
+                    ${signatures.supervisor ? `<img src="${signatures.supervisor}" alt="Supervisor Signature" />` : '<div style="height:50px;"></div>'}
+                    <div><strong>Quality Assurance / Supervisor:</strong> Authorized Signatory</div>
+                    <div style="font-size:7.5pt;color:#64748B;">Road test report verified and archived in quality audit records.</div>
+                </div>
+            </div>
+            <div class="report-signature-brand">
+                <img src="../bustech-logo.png" alt="BusTech Engineering" style="height:50px;mix-blend-mode:multiply;" />
+            </div>
+        </div>
+    `;
+
+    html += `</div>`;
+    return html;
 }
 
 // ─── EVENTS ───
 function setupEventListeners() {
     const searchInput = document.getElementById('searchInput');
-    const debouncedRender = InspectionEngine.debounce(renderGroups, 250);
+    const debouncedRender = InspectionEngine.debounce(renderGroups, 200);
     searchInput.addEventListener('input', (e) => {
         searchQuery = e.target.value;
         debouncedRender();
@@ -435,8 +949,7 @@ function setupEventListeners() {
             });
             tab.classList.add('active');
             tab.setAttribute('aria-pressed', 'true');
-            const map = { All: 'all', Pass: 'pass', Fail: 'fail', Pending: 'pending' };
-            currentFilter = map[tab.textContent.trim()] || 'all';
+            currentFilter = tab.getAttribute('data-filter') || 'all';
             renderGroups();
         });
     });
@@ -454,49 +967,34 @@ function showToast(message, type = 'info') {
         <button class="toast-close" onclick="this.parentElement.remove()">&times;</button>
     `;
     container.appendChild(toast);
-    setTimeout(() => { if (toast.parentElement) toast.remove(); }, 5000);
+    setTimeout(() => {
+        if (toast.parentElement) toast.remove();
+    }, 4500);
 }
 
 // ─── MODAL ───
 let modalCallback = null;
-
 function openModal(title, message, onConfirm, options = {}) {
     document.getElementById('modalTitle').textContent = title;
     document.getElementById('modalMessage').innerHTML = message;
     document.getElementById('modalOverlay').classList.add('open');
     modalCallback = onConfirm;
     modalPreviouslyFocused = document.activeElement;
+
     const confirmBtn = document.getElementById('modalConfirmBtn');
     const cancelBtn = document.querySelector('#modalOverlay .modal-actions .btn-outline');
 
     confirmBtn.textContent = options.confirmText || 'Confirm';
     cancelBtn.textContent = options.cancelText || 'Cancel';
 
-    if (options.requirePhoto) {
-        confirmBtn.disabled = true;
-        confirmBtn.setAttribute('aria-disabled', 'true');
-        const modalInput = document.getElementById('modal-photo-input');
-        const preview = document.getElementById('modal-photo-preview');
-        if (modalInput) {
-            modalInput.addEventListener('change', (e) => {
-                const f = e.target.files[0];
-                if (!f) return;
-                compressImage(f, (compressedBase64) => {
-                    if (options.onPendingPhoto) options.onPendingPhoto(compressedBase64);
-                    if (preview) { preview.src = compressedBase64; preview.style.display = 'block'; }
-                    confirmBtn.disabled = false;
-                    confirmBtn.removeAttribute('aria-disabled');
-                });
-            });
-        }
-    } else {
-        confirmBtn.disabled = false;
-        confirmBtn.removeAttribute('aria-disabled');
-    }
-
-    const callback = modalCallback;
-    confirmBtn.onclick = () => { closeModal(); if (callback) callback(); };
-    cancelBtn.onclick = () => { closeModal(); if (options.onCancel) options.onCancel(); };
+    confirmBtn.onclick = () => {
+        closeModal();
+        if (modalCallback) modalCallback();
+    };
+    cancelBtn.onclick = () => {
+        closeModal();
+        if (options.onCancel) options.onCancel();
+    };
     document.addEventListener('keydown', handleModalKeydown);
     confirmBtn.focus();
 }
@@ -509,331 +1007,68 @@ function closeModal() {
 }
 
 function handleModalKeydown(event) {
-    if (event.key === 'Escape') { event.preventDefault(); closeModal(); return; }
-    if (event.key !== 'Tab') return;
-    const modal = document.querySelector('#modalOverlay .modal');
-    const focusable = Array.from(modal.querySelectorAll('button'));
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = document.activeElement;
-    if (event.shiftKey && active === first) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
-}
-
-// ─── VALIDATION GATE ───
-function runCompletionValidation() {
-    return InspectionEngine.validateCompletion(inspectionItems, ROAD_TEST_CONFIG, challengeIds);
-}
-
-// ─── EXPORT / REPORT ───
-function exportPDF() {
-    saveInspectionMeta();
-    if (!inspectionMeta.inspectionId) {
-        showToast('⚠️ Please ensure inspection info is filled', 'error');
-        return;
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closeModal();
     }
-    const validation = runCompletionValidation();
-    if (!validation.ok) {
-        openModal('Inspection Incomplete', `
-            <p>The following items are outstanding:</p>
-            <ul style="margin-top:8px;padding-left:18px;">${validation.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul>
-            <p style="margin-top:8px">You can still export a draft report marked INCOMPLETE, or go back and finish these items.</p>
-        `, () => generateAndPrint(), { confirmText: 'Export Anyway', cancelText: 'Go Back' });
-        return;
-    }
-    generateAndPrint();
-}
-
-function generateAndPrint() {
-    auditLog.push('COMPLETE', {});
-    timer.complete();
-    document.getElementById('printReport').innerHTML = generatePrintReport();
-    window.print();
-    showToast('📄 PDF print dialog opened', 'info');
-}
-
-function generatePrintReport() {
-    const allGroups = buildGroups();
-    const counters = InspectionEngine.computeCounters(inspectionItems);
-    const integrity = InspectionEngine.computeIntegritySummary(auditLog.load());
-    const timerState = timer.load();
-    const durationMs = timer.elapsedMs(timerState);
-
-    let finalResult = 'INCOMPLETE';
-    let finalResultClass = 'result-pending';
-    if (counters.pending === 0 && counters.failed === 0) { finalResult = 'PASS'; finalResultClass = 'result-pass'; }
-    else if (counters.failed > 0) { finalResult = 'FAIL'; finalResultClass = 'result-fail'; }
-
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' });
-    const timeStr = now.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
-
-    let html = `
-        <div class="report-page">
-            <div class="report-header-block">
-                <img src="../bustech-logo.png" alt="BusTech Logo" class="report-logo" />
-                <h1>${escapeHtml(ROAD_TEST_CONFIG.reportTitle)}</h1>
-                <div class="report-meta-line">
-                    <span>Inspection Type: <strong>Road Test</strong></span>
-                    <span>Checklist Version: <strong>${escapeHtml(ROAD_TEST_CONFIG.checklistVersion)}</strong></span>
-                    <span>Inspection ID: <strong>${escapeHtml(inspectionMeta.inspectionId)}</strong></span>
-                    <span>Date: <strong>${escapeHtml(inspectionMeta.date || dateStr)}</strong></span>
-                    <span>Time: <strong>${timeStr}</strong></span>
-                    <span>Inspector: <strong>${escapeHtml(inspectionMeta.inspector || 'N/A')}</strong></span>
-                    <span>Duration: <strong>${InspectionEngine.formatDuration(durationMs)}</strong></span>
-                    <span>Integrity: <strong>${escapeHtml(integrity.status)}</strong></span>
-                </div>
-            </div>
-
-            <div class="report-section">
-                <h2>Vehicle Information</h2>
-                <table class="report-info-table">
-                    <tr><td>Registration Number</td><td>${escapeHtml(inspectionMeta.registration || 'N/A')}</td></tr>
-                    <tr><td>VIN / Chassis Number</td><td>${escapeHtml(inspectionMeta.vin || 'N/A')}</td></tr>
-                    <tr><td>Vehicle Model</td><td>${escapeHtml(inspectionMeta.model || 'N/A')}</td></tr>
-                    <tr><td>Customer / Company</td><td>${escapeHtml(inspectionMeta.customer || 'N/A')}</td></tr>
-                    <tr><td>Inspection Location</td><td>${escapeHtml(inspectionMeta.location || 'N/A')}</td></tr>
-                </table>
-            </div>
-
-            <div class="report-section">
-                <h2>Inspection Summary</h2>
-                <div class="report-summary-grid">
-                    <div class="report-summary-item">Total Checkpoints: <strong>${counters.total}</strong></div>
-                    <div class="report-summary-item report-pass">PASS: <strong>${counters.passed}</strong></div>
-                    <div class="report-summary-item report-fail">FAIL: <strong>${counters.failed}</strong></div>
-                    <div class="report-summary-item report-pending">PENDING: <strong>${counters.pending}</strong></div>
-                    <div class="report-summary-item">Evidence Captured: <strong>${counters.evidenceCompleted} / ${counters.evidenceRequired}</strong></div>
-                </div>
-                <div class="report-final-result ${finalResultClass}">
-                    FINAL RESULT: <strong>${finalResult}</strong>
-                </div>
-            </div>
-    `;
-
-    html += `<div class="report-section"><h2>Inspection Details</h2>`;
-    for (const group of allGroups) {
-        html += `<div class="report-group">
-            <h3 class="report-group-title">${escapeHtml(group.adc)}</h3>
-            <div class="report-group-stats">Pass: ${group.passCount} | Fail: ${group.failCount} | Pending: ${group.pendCount}</div>`;
-        for (const item of group.items) {
-            const statusText = item.status || 'PENDING';
-            const statusClass = item.status === 'PASS' ? 'status-pass' : item.status === 'FAIL' ? 'status-fail' : 'status-pending';
-            html += `<div class="report-checkpoint">
-                <div class="report-checkpoint-header">
-                    <span class="report-pdc">${escapeHtml(item.pdc)}</span>
-                    <span class="report-status ${statusClass}">${statusText}</span>
-                </div>
-                <div class="report-checkpoint-desc">${escapeHtml(item.picp)}</div>
-                <div class="report-checkpoint-detail">
-                    <span>Method: ${escapeHtml(item.method)}</span>
-                    <span>Spec: ${escapeHtml(item.spec)}</span>
-                </div>`;
-            if (item.remarks) html += `<div class="report-remarks">Remarks: ${escapeHtml(item.remarks)}</div>`;
-            if (item.photo) html += `<div class="report-evidence-photo"><img src="${item.photo}" alt="Evidence photo" /></div>`;
-            else if (item.evidenceRequired) html += `<div class="report-no-photo">⚠️ Required evidence photo missing</div>`;
-            html += `</div>`;
-        }
-        html += `</div>`;
-    }
-    html += `</div>`;
-
-    const failedItems = inspectionItems.filter((i) => i.status === 'FAIL');
-    if (failedItems.length > 0) {
-        html += `<div class="report-section report-evidence-section"><h2>Failure Evidence Summary</h2>`;
-        for (const item of failedItems) {
-            html += `<div class="report-evidence-block">
-                <div class="report-evidence-header">
-                    <span class="report-status status-fail">FAIL</span>
-                    <strong>${escapeHtml(item.picp)}</strong>
-                    <span class="report-pdc">${escapeHtml(item.pdc)}</span>
-                </div>`;
-            if (item.remarks) html += `<div class="report-remarks">Remark: ${escapeHtml(item.remarks)}</div>`;
-            if (item.photo) html += `<div class="report-evidence-photo"><img src="${item.photo}" alt="Evidence" /></div>`;
-            else html += `<div class="report-no-photo">⚠️ Evidence photo missing</div>`;
-            html += `</div>`;
-        }
-        html += `</div>`;
-    }
-
-    if (integrity.reasons.length > 0) {
-        html += `<div class="report-section"><h2>Integrity Notes (informational only)</h2><ul>${integrity.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul></div>`;
-    }
-
-    html += `
-            <div class="report-footer">
-                <div>Inspection ID: ${escapeHtml(inspectionMeta.inspectionId)} | Generated: ${dateStr} ${timeStr}</div>
-                <div>Registration: ${escapeHtml(inspectionMeta.registration || 'N/A')} | VIN: ${escapeHtml(inspectionMeta.vin || 'N/A')}</div>
-            </div>
-        </div>
-    `;
-    return html;
-}
-
-function exportCSV() {
-    const rows = [['PDC', 'ADC', 'SADC', 'PLDC', 'Checkpoint', 'Method', 'Spec', 'Status', 'Remarks']];
-    inspectionItems.forEach((item) => {
-        rows.push([item.pdc, item.adc, item.sadc, item.pldc, item.picp, item.method, item.spec, item.status || 'PENDING', item.remarks]);
-    });
-    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `RoadTest_Report_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-    showToast('📊 CSV exported', 'success');
-}
-
-function saveJSON() {
-    saveInspectionMeta();
-    const data = JSON.stringify({
-        inspectionType: 'Road Test',
-        checklistVersion: ROAD_TEST_CONFIG.checklistVersion,
-        inspectionId: inspectionMeta.inspectionId,
-        vehicle: { registration: inspectionMeta.registration, vin: inspectionMeta.vin, model: inspectionMeta.model, customer: inspectionMeta.customer },
-        inspector: { name: inspectionMeta.inspector },
-        date: inspectionMeta.date,
-        location: inspectionMeta.location,
-        items: inspectionItems
-    }, null, 2);
-    const blob = new Blob([data], { type: 'application/json' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `RoadTest_Save_${inspectionMeta.inspectionId || new Date().toISOString().slice(0, 10)}.json`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-    showToast('💾 Editable JSON saved', 'success');
-}
-
-function importJSON(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        try {
-            const imported = JSON.parse(e.target.result);
-            if (imported && typeof imported === 'object' && !Array.isArray(imported) && Array.isArray(imported.items)) {
-                if (!validateItems(imported.items)) { showToast('❌ Invalid inspection items in file', 'error'); return; }
-                inspectionItems = imported.items;
-                if (imported.inspectionId) inspectionMeta.inspectionId = imported.inspectionId;
-                if (imported.vehicle) {
-                    inspectionMeta.registration = imported.vehicle.registration || '';
-                    inspectionMeta.vin = imported.vehicle.vin || '';
-                    inspectionMeta.model = imported.vehicle.model || '';
-                    inspectionMeta.customer = imported.vehicle.customer || '';
-                }
-                if (imported.inspector) inspectionMeta.inspector = imported.inspector.name || '';
-                if (imported.date) inspectionMeta.date = imported.date;
-                if (imported.location) inspectionMeta.location = imported.location;
-                populateMetaFields();
-                saveInspectionMeta();
-            } else if (Array.isArray(imported) && imported.length > 0) {
-                if (!validateItems(imported)) { showToast('❌ Invalid file format', 'error'); return; }
-                inspectionItems = imported;
-            } else {
-                showToast('❌ Invalid file format', 'error');
-                return;
-            }
-            saveToLocalStorage();
-            renderGroups();
-            updateStats();
-            showToast('📂 Data loaded successfully', 'success');
-        } catch (err) {
-            showToast('❌ Error parsing file', 'error');
-        }
-    };
-    reader.readAsText(file);
-    event.target.value = '';
-}
-
-function validateItems(items) {
-    if (!Array.isArray(items) || items.length === 0) return false;
-    const first = items[0];
-    if (first.id === undefined || typeof first.pdc !== 'string' || typeof first.adc !== 'string') return false;
-    for (const item of items) {
-        if (typeof item.id !== 'number') return false;
-        if (typeof item.status !== 'string' && item.status !== undefined && item.status !== '') return false;
-    }
-    return true;
 }
 
 // ─── THEME ───
-function scanQR() {
-    showToast('📷 QR scanner placeholder (html5-qrcode integration ready)', 'info');
-}
-
 function getStoredTheme() {
-    return localStorage.getItem('rt-theme') || 'light';
+    return localStorage.getItem('pdi-theme') || 'light';
 }
 
 function applyTheme(theme) {
     const isDark = theme === 'dark';
     document.body.setAttribute('data-theme', isDark ? 'dark' : 'light');
-    localStorage.setItem('rt-theme', theme);
+    localStorage.setItem('pdi-theme', theme);
     const icon = document.querySelector('.app-header .header-actions button[title="Theme"] i');
     if (icon) icon.className = isDark ? 'fas fa-sun' : 'fas fa-moon';
 }
 
 function toggleDarkMode() {
-    const nextTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-    applyTheme(nextTheme);
+    const next = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
     renderGroups();
-    showToast(nextTheme === 'dark' ? '🌙 Dark mode enabled' : '☀️ Light mode enabled', 'info');
+    showToast(next === 'dark' ? '🌙 Dark mode enabled' : '☀️ Light mode enabled', 'info');
 }
 
 function initTheme() {
     applyTheme(getStoredTheme());
 }
 
-// ─── TIMER (elapsed count-up, timestamp-based - survives refresh/backgrounding/sleep) ──
+// ─── TIMER CONTROLS ───
 function updateTimerDisplay(displayMs) {
-    const displayEl = document.getElementById('timerDisplay');
-    if (displayEl) displayEl.textContent = InspectionEngine.formatDuration(displayMs != null ? displayMs : timer.elapsedMs());
-}
+    const totalSecs = Math.floor(displayMs / 1000);
+    const hrs = Math.floor(totalSecs / 3600);
+    const mins = Math.floor((totalSecs % 3600) / 60);
+    const secs = totalSecs % 60;
+    const str = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 
-function updateTimerControls(isRunning) {
-    const controlBtn = document.getElementById('timerControlBtn');
-    if (controlBtn) {
-        controlBtn.innerHTML = isRunning ? '<i class="fas fa-pause"></i>' : '<i class="fas fa-play"></i>';
-        controlBtn.title = isRunning ? 'Pause Timer' : 'Resume Timer';
-    }
+    const displayEl = document.getElementById('timerDisplay');
+    if (displayEl) displayEl.textContent = str;
 }
 
 function toggleTimer() {
     const state = timer.load();
-    if (state && state.pausedAt) {
+    const controlBtn = document.getElementById('timerControlBtn');
+    if (!state || state.pausedAt) {
         timer.resume();
-        auditLog.push('RESUME', {});
-        updateTimerControls(true);
-        showToast('▶️ Timer resumed', 'info');
+        if (controlBtn) controlBtn.innerHTML = '<i class="fas fa-pause"></i>';
+        showToast('▶️ Road test stopwatch running', 'info');
     } else {
         timer.pause();
-        auditLog.push('PAUSE', {});
-        updateTimerControls(false);
-        showToast('⏸️ Timer paused', 'info');
+        if (controlBtn) controlBtn.innerHTML = '<i class="fas fa-play"></i>';
+        showToast('⏸️ Stopwatch paused', 'info');
     }
 }
 
 function resetTimer() {
     timer.resetTimer();
-    updateTimerControls(true);
-}
-
-// ─── SERVICE WORKER REGISTRATION (shared with Static PDI - scope covers both apps) ──
-if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-        navigator.serviceWorker.register('../service-worker.js')
-            .then((reg) => console.log('Service Worker registered successfully!', reg.scope))
-            .catch((err) => console.log('Service Worker registration failed:', err));
-    });
+    timer.start();
+    const controlBtn = document.getElementById('timerControlBtn');
+    if (controlBtn) controlBtn.innerHTML = '<i class="fas fa-pause"></i>';
 }
 
 // ─── START ───
-document.addEventListener('DOMContentLoaded', () => {
-    validateChecklistData(roadTestChecklist);
-    init();
-    timer.start(timer.load());
-    updateTimerControls(true);
-});
+document.addEventListener('DOMContentLoaded', init);

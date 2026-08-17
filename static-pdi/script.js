@@ -449,7 +449,18 @@ let inspectionItems = [];
 let currentFilter = 'all';
 let searchQuery = '';
 let currentlyOpenGroup = null;
+let autoAdvanceEnabled = true;
 let modalPreviouslyFocused = null;
+
+let inspectorSigPad = null;
+let supervisorSigPad = null;
+let signatures = {
+    inspector: null,
+    supervisor: null,
+    signedAt: null
+};
+
+let qrStream = null;
 
 // ─── INSPECTION METADATA ───
 let inspectionMeta = {
@@ -463,6 +474,17 @@ let inspectionMeta = {
     location: ''
 };
 
+const auditLog = InspectionEngine.createAuditLog('pdi-audit-log');
+const timer = InspectionEngine.createTimer({
+    storageKey: 'pdi-timer-state',
+    mode: 'countdown',
+    durationSeconds: 7200, // 2-hour standard PDI window
+    onTick: ({ displayMs, expired }) => {
+        updateTimerDisplay(displayMs);
+        if (expired) handleTimerExpiry();
+    }
+});
+
 function generateInspectionId() {
     const now = new Date();
     const dateStr = now.getFullYear().toString() +
@@ -472,22 +494,14 @@ function generateInspectionId() {
     return 'PDI-' + dateStr + '-' + seq;
 }
 
+// ─── META PERSISTENCE ───
 function loadInspectionMeta() {
-    const saved = localStorage.getItem('pdi-inspection-meta');
-    if (saved) {
-        try {
-            const parsed = JSON.parse(saved);
-            if (parsed && typeof parsed === 'object') {
-                inspectionMeta = { ...inspectionMeta, ...parsed };
-            }
-        } catch (e) { /* ignore */ }
+    const saved = InspectionEngine.safeGetJSON('pdi-inspection-meta', null);
+    if (saved && typeof saved === 'object') {
+        inspectionMeta = { ...inspectionMeta, ...saved };
     }
-    if (!inspectionMeta.inspectionId) {
-        inspectionMeta.inspectionId = generateInspectionId();
-    }
-    if (!inspectionMeta.date) {
-        inspectionMeta.date = new Date().toISOString().slice(0, 10);
-    }
+    if (!inspectionMeta.inspectionId) inspectionMeta.inspectionId = generateInspectionId();
+    if (!inspectionMeta.date) inspectionMeta.date = new Date().toISOString().slice(0, 10);
     populateMetaFields();
 }
 
@@ -522,80 +536,77 @@ function saveInspectionMeta() {
         const el = document.getElementById(elId);
         if (el) inspectionMeta[key] = el.value;
     }
-    try {
-        localStorage.setItem('pdi-inspection-meta', JSON.stringify(inspectionMeta));
-    } catch (e) { /* ignore */ }
+    InspectionEngine.safeSetJSON('pdi-inspection-meta', inspectionMeta);
 }
 
 function setupMetaListeners() {
-    const inputs = document.querySelectorAll('#inspectionInfoBody input');
-    inputs.forEach(input => {
+    document.querySelectorAll('#inspectionInfoBody input').forEach((input) => {
         input.addEventListener('change', saveInspectionMeta);
         input.addEventListener('blur', saveInspectionMeta);
     });
 }
 
-let inspectionInfoOpen = true;
+let inspectionInfoOpen = false;
 function toggleInspectionInfo() {
     inspectionInfoOpen = !inspectionInfoOpen;
     const body = document.getElementById('inspectionInfoBody');
     const toggle = document.getElementById('inspectionInfoToggle');
-    if (body) body.style.display = inspectionInfoOpen ? 'grid' : 'none';
-    if (toggle) toggle.style.transform = inspectionInfoOpen ? 'rotate(180deg)' : 'rotate(0)';
+    if (body) {
+        if (inspectionInfoOpen) body.classList.remove('collapsed');
+        else body.classList.add('collapsed');
+    }
+    if (toggle) {
+        if (inspectionInfoOpen) toggle.classList.add('open');
+        else toggle.classList.remove('open');
+    }
 }
 
-// ─── TIMER STATE ───
-let timerInterval = null;
-let timerSecondsLeft = 7200; // 2 hours
-let isTimerRunning = false;
-
-// ─── SAVE / AUTO-SAVE ───
+// ─── LOCAL STORAGE ───
 function saveToLocalStorage() {
-    const ok = InspectionEngine.safeSetJSON('pdi-inspection-items', inspectionItems, () => {
-        showToast('⚠️ Storage full. Some photo attachments may be too large.', 'error');
+    InspectionEngine.safeSetJSON('pdi-inspection-items', inspectionItems, () => {
+        showToast('⚠️ Storage quota warning - some photos may be large', 'error');
     });
-    if (!ok) console.error('Failed to save inspection items');
 }
 
-// ─── IMAGE COMPRESSION ───
 function compressImage(file, callback) {
     InspectionEngine.compressImage(file, { maxDimension: 1024, quality: 0.7 }, callback);
 }
 
-// ─── INIT ───
+// ─── INITIALIZATION ───
 function init() {
     initTheme();
     setupEventListeners();
     setupMetaListeners();
-    initTimer();
     loadInspectionMeta();
 
-    const savedItems = localStorage.getItem('pdi-inspection-items');
-    if (savedItems) {
-        try {
-            const parsed = JSON.parse(savedItems);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-                // Restore modal
-                openModal('Resume Session?', `
-                    <p>We found an in-progress inspection from your previous session.</p>
-                    <p style="margin-top:8px">Would you like to <strong>Resume</strong> it or <strong>Start Fresh</strong>?</p>
-                `, () => {
-                    inspectionItems = parsed;
-                    renderGroups();
-                    updateStats();
-                    showToast('📂 Previous session restored', 'success');
-                }, {
-                    confirmText: 'Resume',
-                    cancelText: 'Start Fresh',
-                    onCancel: () => {
-                        startFreshSession();
-                    }
-                });
-                return;
-            }
-        } catch (e) {
-            console.error('Failed to parse saved items', e);
-        }
+    const savedAutoAdvance = localStorage.getItem('pdi-auto-advance');
+    if (savedAutoAdvance !== null) {
+        autoAdvanceEnabled = savedAutoAdvance === 'true';
+        updateAutoAdvanceButton();
+    }
+
+    const savedSignatures = InspectionEngine.safeGetJSON('pdi-signatures', null);
+    if (savedSignatures) signatures = savedSignatures;
+
+    const savedItems = InspectionEngine.safeGetJSON('pdi-inspection-items', null);
+    if (Array.isArray(savedItems) && savedItems.length > 0) {
+        // Pause timer while waiting for user response
+        timer.pause();
+        openModal('Resume Session?', `
+            <p>We found an in-progress PDI inspection from your previous session.</p>
+            <p style="margin-top:8px;color:var(--text-secondary);">Would you like to <strong>Resume</strong> or <strong>Start Fresh</strong>?</p>
+        `, () => {
+            inspectionItems = savedItems;
+            renderGroups();
+            updateStats();
+            timer.resume();
+            showToast('📂 Previous session resumed', 'success');
+        }, {
+            confirmText: 'Resume Session',
+            cancelText: 'Start Fresh',
+            onCancel: () => startFreshSession()
+        });
+        return;
     }
 
     startFreshSession();
@@ -620,21 +631,27 @@ function startFreshSession() {
         date: new Date().toISOString().slice(0, 10),
         location: ''
     };
+    signatures = { inspector: null, supervisor: null, signedAt: null };
+    localStorage.removeItem('pdi-signatures');
+    localStorage.removeItem('pdi-pause-logs');
     populateMetaFields();
     saveInspectionMeta();
-    resetTimer();
+    timer.resetTimer();
+    timer.start();
     saveToLocalStorage();
     renderGroups();
     updateStats();
+    auditLog.clear();
+    auditLog.push('SESSION_START', { inspectionId: inspectionMeta.inspectionId });
 }
 
 function confirmReset() {
     openModal('Reset Inspection?', `
         <p>Are you sure you want to reset all inspection checkpoints, photos, and remarks?</p>
-        <p style="color:var(--danger);margin-top:8px;">⚠️ This action cannot be undone unless you have exported your data.</p>
+        <p style="color:var(--danger);margin-top:8px;font-weight:600;">⚠️ This action cannot be undone.</p>
     `, () => {
         startFreshSession();
-        showToast('↩️ Inspection reset successful', 'info');
+        showToast('↩️ Inspection reset to fresh session', 'info');
     }, { confirmText: 'Reset All', cancelText: 'Cancel' });
 }
 
@@ -643,17 +660,16 @@ function buildGroups() {
     return InspectionEngine.buildGroups(inspectionItems, 'adc');
 }
 
-// Any-match visibility per group (a group with mixed statuses shows under every matching filter).
 function getFilteredGroups() {
     const groups = buildGroups();
     return InspectionEngine.getFilteredGroups(groups, currentFilter, searchQuery, ['picp', 'pdc', 'sadc', 'pldc', 'method', 'spec']);
 }
 
-// ─── RENDER GROUPS ───
 function escapeHtml(value = '') {
     return InspectionEngine.escapeHtml(value);
 }
 
+// ─── RENDER GROUPS ───
 function renderGroups() {
     const container = document.getElementById('groupList');
     const groups = getFilteredGroups();
@@ -662,14 +678,14 @@ function renderGroups() {
         container.innerHTML = `
             <div class="empty-state">
                 <i class="fas fa-layer-group"></i>
-                <h3>No assemblies found</h3>
-                <p>Try adjusting your search or filter.</p>
+                <h3>No assemblies match criteria</h3>
+                <p>Try adjusting your search query or filter tab.</p>
             </div>
         `;
         return;
     }
 
-    container.innerHTML = groups.map(group => {
+    container.innerHTML = groups.map((group) => {
         const total = group.items.length;
         const pct = total > 0 ? Math.round((group.passCount / total) * 100) : 0;
         let fgClass = 'fg';
@@ -679,55 +695,60 @@ function renderGroups() {
 
         const circumference = 2 * Math.PI * 18;
         const offset = circumference - (pct / 100) * circumference;
-
         const isOpen = currentlyOpenGroup === group.adc;
 
-        const itemsHtml = isOpen ? group.items.map(item => {
+        const itemsHtml = isOpen ? group.items.map((item) => {
+            const isPass = item.status === 'PASS';
             const isFail = item.status === 'FAIL';
             const showEvidence = isFail || item.photo || item.remarks;
+
             return `
-                <div class="item-row">
+                <div class="item-row" id="item-row-${item.id}">
                     <div class="item-info">
-                        <div class="item-id">${escapeHtml(item.pdc)}</div>
+                        <div class="item-id">${escapeHtml(item.pdc)} · <span style="color:var(--text-secondary)">${escapeHtml(item.sadc)}</span></div>
                         <div class="item-title">${escapeHtml(item.picp)}</div>
-                        <div class="item-spec">${escapeHtml(item.spec)}</div>
+                        <div class="item-spec"><i class="fas fa-bullseye" style="font-size:0.75rem;opacity:0.7;"></i> ${escapeHtml(item.spec)}</div>
                         <div class="item-evidence ${showEvidence ? 'visible' : ''}">
-                            <div class="photo-fail-area ${showEvidence ? 'visible' : ''}" id="photoArea-${item.id}">
-                                <label for="photo-${item.id}" title="Upload evidence photo" aria-label="Upload evidence photo for ${escapeHtml(item.picp)}">
-                                    <i class="fas fa-camera" aria-hidden="true"></i>
-                                    <span>Photo</span>
+                            <div class="photo-fail-area">
+                                <label for="photo-${item.id}" title="Capture or upload photo">
+                                    <i class="fas fa-camera"></i>
+                                    <span>${item.photo ? 'Retake Photo' : 'Add Photo'}</span>
                                 </label>
                                 <input type="file" id="photo-${item.id}" accept="image/*" capture="environment" onchange="handlePhoto(${item.id}, this)" />
-                                <img class="photo-preview-fail ${item.photo ? 'visible' : ''}" id="preview-${item.id}" src="${item.photo || ''}" alt="evidence" />
+                                <img class="photo-preview-fail ${item.photo ? 'visible' : ''}" id="preview-${item.id}" src="${item.photo || ''}" alt="Evidence photo" />
                             </div>
-                            <textarea class="evidence-remarks" placeholder="Add remarks, defect details, or test notes..." oninput="updateRemarks(${item.id}, this.value)">${escapeHtml(item.remarks || '')}</textarea>
+                            <div class="evidence-remarks-wrap">
+                                <textarea class="evidence-remarks" id="remarks-${item.id}" placeholder="Add defect notes or observations..." oninput="updateRemarks(${item.id}, this.value)">${escapeHtml(item.remarks || '')}</textarea>
+                                <button type="button" class="btn-mic-inline" title="Dictate notes with speech" onclick="dictateForRemarks(${item.id})">
+                                    <i class="fas fa-microphone"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                     <div class="item-actions">
-                        <button type="button" class="status-btn btn-pass ${item.status === 'PASS' ? 'active' : ''}" onclick="setStatus(${item.id}, 'PASS')" aria-pressed="${item.status === 'PASS'}" aria-label="Mark ${escapeHtml(item.picp)} as pass">
-                            <i class="fas fa-check" aria-hidden="true"></i>
+                        <button type="button" class="status-btn btn-pass ${isPass ? 'active' : ''}" onclick="setStatus(${item.id}, 'PASS')" aria-pressed="${isPass}" aria-label="Mark ${escapeHtml(item.picp)} as pass">
+                            <i class="fas fa-check"></i>
                         </button>
                         <button type="button" class="status-btn btn-fail ${isFail ? 'active' : ''}" onclick="setStatus(${item.id}, 'FAIL')" aria-pressed="${isFail}" aria-label="Mark ${escapeHtml(item.picp)} as fail">
-                            <i class="fas fa-times" aria-hidden="true"></i>
+                            <i class="fas fa-times"></i>
                         </button>
                     </div>
                 </div>
             `;
         }).join('') : '';
 
-        const contentId = `group-content-${group.adc.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
         return `
-            <div class="group-card">
-                <div class="group-header" role="button" tabindex="0" aria-expanded="${isOpen}" aria-controls="${contentId}" onclick="toggleGroup('${group.adc}')" onkeydown="handleGroupKeyDown(event, '${group.adc}')">
+            <div class="group-card" id="group-card-${escapeHtml(group.adc).replace(/[^a-zA-Z0-9_-]/g, '-')}">
+                <div class="group-header" role="button" tabindex="0" onclick="toggleGroup('${escapeHtml(group.adc)}')">
                     <div class="group-info">
                         <div class="group-title">
-                            ${group.adc}
-                            <span class="badge">${group.items.length}</span>
+                            ${escapeHtml(group.adc)}
+                            <span class="badge">${group.items.length} checks</span>
                         </div>
                         <div class="group-meta">
-                            <span class="stat-chip pass-chip"><i class="fas fa-check-circle" aria-hidden="true"></i> ${group.passCount}</span>
-                            <span class="stat-chip fail-chip"><i class="fas fa-times-circle" aria-hidden="true"></i> ${group.failCount}</span>
-                            <span class="stat-chip pend-chip"><i class="fas fa-minus-circle" aria-hidden="true"></i> ${group.pendCount}</span>
+                            <span class="stat-chip pass-chip"><i class="fas fa-check-circle"></i> ${group.passCount}</span>
+                            <span class="stat-chip fail-chip"><i class="fas fa-times-circle"></i> ${group.failCount}</span>
+                            <span class="stat-chip pend-chip"><i class="fas fa-circle-notch"></i> ${group.pendCount}</span>
                         </div>
                     </div>
                     <div class="group-progress">
@@ -747,96 +768,271 @@ function renderGroups() {
     }).join('');
 }
 
-// ─── TOGGLE GROUP (Accordion: only one open at a time) ───
 function toggleGroup(adc) {
-    if (currentlyOpenGroup === adc) {
-        currentlyOpenGroup = null; // close if already open
-    } else {
-        currentlyOpenGroup = adc; // open this, close any other
-    }
-    renderGroups(); // re-render to reflect the new open state
+    currentlyOpenGroup = (currentlyOpenGroup === adc) ? null : adc;
+    renderGroups();
 }
 
-function handleGroupKeyDown(event, adc) {
-    const keys = ['Enter', ' '];
-    if (keys.includes(event.key)) {
-        event.preventDefault();
-        toggleGroup(adc);
-    }
-}
-
-// ─── STATUS ───
-function setStatus(id, status) {
+// ─── STATUS UPDATES & GUIDED FLOW ───
+function setStatus(id, targetStatus) {
     const item = inspectionItems.find(i => i.id === id);
     if (!item) return;
 
-    if (status === 'FAIL' && item.status !== 'FAIL') {
-        let pendingPhoto = null;
-        const modalHtml = `
-            <div>Mark <strong>${escapeHtml(item.picp)}</strong> as <strong>FAIL</strong>.</div>
-            <div style="margin-top:8px">
-                <label for="modal-photo-input" class="photo-upload-label">Upload evidence photo<span style="color:var(--danger)"> *</span></label>
-                <input type="file" id="modal-photo-input" accept="image/*" capture="environment" />
-                <div><img id="modal-photo-preview" class="photo-preview-fail" src="" alt="evidence preview" style="display:none;margin-top:8px;max-width:160px;"/></div>
-            </div>
-            <div style="margin-top:8px">
-                <textarea id="modal-remarks" placeholder="Add remarks (optional)" style="width:100%;min-height:80px;border-radius:8px;border:1px solid var(--border);padding:8px;font:inherit"></textarea>
-            </div>
-        `;
-        openModal('Confirm Fail', modalHtml, () => {
-            // Only attach photo on confirm
-            if (pendingPhoto) {
-                item.photo = pendingPhoto;
-            }
-            const modalRemarks = document.getElementById('modal-remarks');
-            if (modalRemarks) {
-                item.remarks = modalRemarks.value;
-            }
-            applyStatus(item, 'FAIL');
-        }, {
-            requirePhoto: true,
-            itemId: item.id,
-            onPendingPhoto: function(base64) { pendingPhoto = base64; },
-            onCancel: function() {
-                // Discard pending evidence - do nothing
-                pendingPhoto = null;
-            }
-        });
+    if (targetStatus === 'FAIL' && item.status !== 'FAIL') {
+        openFailModal(item);
         return;
     }
 
-    if (status === 'PASS' && item.status === 'PASS') status = '';
-    else if (status === 'FAIL' && item.status === 'FAIL') status = '';
+    // RANDOM EVIDENCE CHECK FOR PASS
+    if (targetStatus === 'PASS' && item.status !== 'PASS' && !item.photo) {
+        // 5% chance to force photo evidence
+        if (Math.random() < 0.05) {
+            openModal('Random Quality Check', `
+                <p>This checkpoint has been randomly selected for a quality audit.</p>
+                <p>Please provide photo evidence to pass this checkpoint.</p>
+                <div style="margin-top:12px;">
+                    <label class="photo-fail-area">
+                        <label for="auditPhotoInput" style="cursor:pointer;">
+                            <i class="fas fa-camera"></i> Capture Audit Photo
+                        </label>
+                        <input type="file" id="auditPhotoInput" accept="image/*" capture="environment" />
+                    </label>
+                    <img id="auditPhotoPreview" class="photo-preview-fail" style="display:none;margin-top:8px;max-width:180px;height:auto;" alt="Audit preview" />
+                </div>
+            `, () => {
+                const preview = document.getElementById('auditPhotoPreview');
+                if (preview && preview.src && preview.style.display === 'block') {
+                    item.photo = preview.src;
+                    applyStatus(item, 'PASS');
+                } else {
+                    showToast('Photo evidence is required for this audit.', 'error');
+                }
+            }, {
+                confirmText: 'Submit Evidence',
+                cancelText: 'Cancel'
+            });
 
-    applyStatus(item, status);
+            setTimeout(() => {
+                const photoInput = document.getElementById('auditPhotoInput');
+                const preview = document.getElementById('auditPhotoPreview');
+                if (photoInput) {
+                    photoInput.addEventListener('change', (e) => {
+                        const file = e.target.files[0];
+                        if (!file) return;
+                        compressImage(file, (base64) => {
+                            if (preview) {
+                                preview.src = base64;
+                                preview.style.display = 'block';
+                            }
+                        });
+                    });
+                }
+            }, 50);
+
+            return; // Wait for modal action
+        }
+    }
+
+    let nextStatus = targetStatus;
+    if (item.status === targetStatus) nextStatus = ''; // Toggle off
+
+    applyStatus(item, nextStatus);
 }
 
 function applyStatus(item, status) {
-    // Preserve history before changing status
-    if (item.status && item.status !== status) {
-        if (!item.history) item.history = [];
-        item.history.push({
-            status: item.status,
-            timestamp: new Date().toISOString(),
-            remark: item.remarks || '',
-            photo: item.photo || null
-        });
-    }
     item.status = status;
-    // Do NOT clear photo when changing to PASS - preserve evidence
     saveToLocalStorage();
     renderGroups();
     updateStats();
-    const msg = status === 'PASS' ? '✅ Marked PASS' : status === 'FAIL' ? '❌ Marked FAIL' : '↩️ Status cleared';
-    const type = status === 'PASS' ? 'success' : status === 'FAIL' ? 'error' : 'info';
-    if (status === 'FAIL') {
-        showToast('⚠️ Failed! Please capture evidence photo.', 'error');
+
+
+
+    if (status === 'PASS') {
+        showToast(`✅ Passed: ${item.picp}`, 'success');
+        if (autoAdvanceEnabled) advanceToNextPending(item.id);
+    } else if (status === 'FAIL') {
+        showToast(`❌ Failed: ${item.picp}`, 'error');
+        if (autoAdvanceEnabled) advanceToNextPending(item.id);
     } else {
-        showToast(msg, type);
+        showToast('↩️ Status cleared', 'info');
     }
 }
 
-// ─── PHOTO / EVIDENCE ───
+function openFailModal(item) {
+    let pendingPhoto = null;
+    const defectTagsHtml = InspectionEngine.COMMON_DEFECT_TAGS.map(tag =>
+        `<button type="button" class="defect-tag-pill" onclick="appendDefectTag('${escapeHtml(tag)}')">${escapeHtml(tag)}</button>`
+    ).join('');
+
+    const modalContent = `
+        <div style="font-size:0.95rem;margin-bottom:8px;">
+            Checkpoint: <strong>${escapeHtml(item.picp)}</strong> (<span style="font-family:monospace">${escapeHtml(item.pdc)}</span>)
+        </div>
+        <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:10px;">
+            Spec: ${escapeHtml(item.spec)}
+        </div>
+
+        <div style="margin-top:10px;position:relative;">
+            <label for="modalFailRemarks" style="font-size:0.82rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Defect Details &amp; Observations:</label>
+            <div style="position:relative;margin-top:4px;">
+                <textarea id="modalFailRemarks" class="evidence-remarks" style="min-height:75px;" placeholder="Describe the defect or reason for failure...">${escapeHtml(item.remarks || '')}</textarea>
+                <button type="button" class="btn-mic-inline" id="modalMicBtn" title="Voice dictation" onclick="dictateForModal()">
+                    <i class="fas fa-microphone"></i>
+                </button>
+            </div>
+        </div>
+
+        <div style="margin-top:12px;">
+            <label class="photo-fail-area">
+                <label for="modalPhotoInput" style="cursor:pointer;">
+                    <i class="fas fa-camera"></i> Capture Defect Photo
+                </label>
+                <input type="file" id="modalPhotoInput" accept="image/*" capture="environment" />
+            </label>
+            <img id="modalPhotoPreview" class="photo-preview-fail" style="display:none;margin-top:8px;max-width:180px;height:auto;" alt="Defect preview" />
+        </div>
+    `;
+
+    openModal('Record Inspection Defect', modalContent, () => {
+        const remarksEl = document.getElementById('modalFailRemarks');
+        if (remarksEl) item.remarks = remarksEl.value;
+        if (pendingPhoto) item.photo = pendingPhoto;
+        applyStatus(item, 'FAIL');
+    }, {
+        confirmText: 'Confirm Defect (FAIL)',
+        cancelText: 'Cancel'
+    });
+
+    // Wire up modal photo input
+    setTimeout(() => {
+        const photoInput = document.getElementById('modalPhotoInput');
+        const preview = document.getElementById('modalPhotoPreview');
+        if (photoInput) {
+            photoInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                compressImage(file, (base64) => {
+                    pendingPhoto = base64;
+                    if (preview) {
+                        preview.src = base64;
+                        preview.style.display = 'block';
+                    }
+                });
+            });
+        }
+    }, 50);
+}
+
+function appendDefectTag(tag) {
+    const textarea = document.getElementById('modalFailRemarks');
+    if (!textarea) return;
+    if (textarea.value.trim().length > 0) {
+        textarea.value = textarea.value.trim() + '; ' + tag;
+    } else {
+        textarea.value = tag;
+    }
+}
+
+// ─── AUTO-ADVANCE & NEXT PENDING ───
+function toggleAutoAdvance() {
+    autoAdvanceEnabled = !autoAdvanceEnabled;
+    localStorage.setItem('pdi-auto-advance', autoAdvanceEnabled ? 'true' : 'false');
+    updateAutoAdvanceButton();
+    showToast(autoAdvanceEnabled ? '⏩ Auto-advance enabled' : '⏸️ Auto-advance disabled', 'info');
+}
+
+function updateAutoAdvanceButton() {
+    const btn = document.getElementById('btnAutoAdvance');
+    if (!btn) return;
+    if (autoAdvanceEnabled) {
+        btn.classList.add('active');
+        btn.innerHTML = '<i class="fas fa-step-forward"></i> Auto-Advance (ON)';
+    } else {
+        btn.classList.remove('active');
+        btn.innerHTML = '<i class="fas fa-pause"></i> Auto-Advance (OFF)';
+    }
+}
+
+function advanceToNextPending(currentId) {
+    const nextItem = InspectionEngine.findNextPendingItem(inspectionItems, currentId);
+    if (!nextItem) {
+        showToast('🎉 All checkpoints verified!', 'success');
+        return;
+    }
+    currentlyOpenGroup = nextItem.adc;
+    renderGroups();
+    setTimeout(() => {
+        const row = document.getElementById(`item-row-${nextItem.id}`);
+        if (row) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            row.classList.add('focused');
+            setTimeout(() => row.classList.remove('focused'), 1800);
+        }
+    }, 80);
+}
+
+function jumpToNextPending() {
+    const nextItem = InspectionEngine.findNextPendingItem(inspectionItems, null);
+    if (!nextItem) {
+        showToast('✨ All checkpoints completed! Ready for sign-off.', 'success');
+        return;
+    }
+    currentlyOpenGroup = nextItem.adc;
+    renderGroups();
+    setTimeout(() => {
+        const row = document.getElementById(`item-row-${nextItem.id}`);
+        if (row) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            row.classList.add('focused');
+            setTimeout(() => row.classList.remove('focused'), 2000);
+        }
+    }, 100);
+}
+
+// ─── CATEGORY JUMP DRAWER ───
+function openCategoryDrawer() {
+    renderCategoryDrawer();
+    document.getElementById('drawerOverlay').classList.add('open');
+    document.getElementById('categoryDrawer').classList.add('open');
+}
+
+function closeCategoryDrawer() {
+    document.getElementById('drawerOverlay').classList.remove('open');
+    document.getElementById('categoryDrawer').classList.remove('open');
+}
+
+function renderCategoryDrawer() {
+    const body = document.getElementById('drawerBody');
+    const groups = buildGroups();
+    body.innerHTML = groups.map((g) => {
+        const total = g.items.length;
+        const done = g.passCount + g.failCount;
+        const pct = Math.round((done / total) * 100);
+        return `
+            <div class="drawer-item" onclick="jumpToGroup('${escapeHtml(g.adc)}')">
+                <div>
+                    <div class="drawer-item-title">${escapeHtml(g.adc)}</div>
+                    <div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px;">
+                        ${g.passCount} Pass · ${g.failCount} Fail · ${g.pendCount} Pending
+                    </div>
+                </div>
+                <div style="font-weight:700;font-size:0.85rem;color:${pct === 100 ? 'var(--success)' : 'var(--primary)'}">${pct}%</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function jumpToGroup(adc) {
+    currentlyOpenGroup = adc;
+    closeCategoryDrawer();
+    renderGroups();
+    setTimeout(() => {
+        const groupEl = document.getElementById(`group-card-${adc.replace(/[^a-zA-Z0-9_-]/g, '-')}`);
+        if (groupEl) groupEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
+}
+
+// ─── PHOTO & REMARKS ───
 function handlePhoto(id, input) {
     const file = input.files[0];
     if (!file) return;
@@ -846,45 +1042,393 @@ function handlePhoto(id, input) {
         item.photo = compressedBase64;
         saveToLocalStorage();
         renderGroups();
-        showToast('📸 Evidence photo compressed & saved', 'success');
+        showToast('📸 Photo evidence attached', 'success');
+
     });
 }
 
-function updateRemarks(id, value) {
+function updateRemarks(id, val) {
     const item = inspectionItems.find(i => i.id === id);
     if (!item) return;
-    item.remarks = value;
+    item.remarks = val;
     saveToLocalStorage();
 }
 
-// ─── STATS ───
+// ─── VOICE DICTATION ───
+let inlineVoiceDictation = null;
+function dictateForRemarks(id) {
+    const textarea = document.getElementById(`remarks-${id}`);
+    if (!textarea) return;
+
+    if (!inlineVoiceDictation) {
+        inlineVoiceDictation = InspectionEngine.createVoiceDictation({
+            onResult: (text) => {
+                textarea.value = (textarea.value.trim() ? textarea.value.trim() + ' ' : '') + text;
+                updateRemarks(id, textarea.value);
+            },
+            onError: (err) => showToast(`Speech error: ${err}`, 'error')
+        });
+    }
+
+    if (!inlineVoiceDictation.isSupported) {
+        showToast('Microphone dictation not supported in this browser.', 'error');
+        return;
+    }
+    inlineVoiceDictation.toggle();
+    showToast('🎙️ Speak your inspection notes...', 'info');
+}
+
+let modalVoiceDictation = null;
+function dictateForModal() {
+    const textarea = document.getElementById('modalFailRemarks');
+    const micBtn = document.getElementById('modalMicBtn');
+    if (!textarea) return;
+
+    if (!modalVoiceDictation) {
+        modalVoiceDictation = InspectionEngine.createVoiceDictation({
+            onResult: (text) => {
+                textarea.value = (textarea.value.trim() ? textarea.value.trim() + ' ' : '') + text;
+            },
+            onStateChange: (isListening) => {
+                if (micBtn) {
+                    if (isListening) micBtn.classList.add('recording');
+                    else micBtn.classList.remove('recording');
+                }
+            },
+            onError: (err) => showToast(`Speech error: ${err}`, 'error')
+        });
+    }
+
+    if (!modalVoiceDictation.isSupported) {
+        showToast('Microphone dictation not supported.', 'error');
+        return;
+    }
+    modalVoiceDictation.toggle();
+}
+
+// ─── STATS & LIVE HUD ───
 function updateStats() {
     const counters = InspectionEngine.computeCounters(inspectionItems);
     document.getElementById('totalCount').textContent = counters.total;
     document.getElementById('passedCount').textContent = counters.passed;
     document.getElementById('failedCount').textContent = counters.failed;
     document.getElementById('pendingCount').textContent = counters.pending;
+
+    const fill = document.getElementById('overallProgressFill');
+    if (fill) {
+        const pct = counters.total > 0 ? ((counters.completed / counters.total) * 100).toFixed(1) : 0;
+        fill.style.width = `${pct}%`;
+    }
+}
+
+// ─── DIGITAL SIGNATURES ───
+function openSignOffModal() {
+    saveInspectionMeta();
+    document.getElementById('signOffModalOverlay').classList.add('open');
+    setTimeout(() => {
+        if (!inspectorSigPad) {
+            const inspCanvas = document.getElementById('inspectorSigCanvas');
+            inspectorSigPad = InspectionEngine.createSignaturePad(inspCanvas);
+        }
+        if (!supervisorSigPad) {
+            const supCanvas = document.getElementById('supervisorSigCanvas');
+            supervisorSigPad = InspectionEngine.createSignaturePad(supCanvas);
+        }
+        if (inspectorSigPad) inspectorSigPad.resize();
+        if (supervisorSigPad) supervisorSigPad.resize();
+    }, 100);
+}
+
+function closeSignOffModal() {
+    document.getElementById('signOffModalOverlay').classList.remove('open');
+}
+
+function clearInspectorSignature() {
+    if (inspectorSigPad) inspectorSigPad.clear();
+}
+
+function clearSupervisorSignature() {
+    if (supervisorSigPad) supervisorSigPad.clear();
+}
+
+function saveSignaturesAndExport() {
+    const inspData = inspectorSigPad ? inspectorSigPad.toDataURL() : null;
+    const supData = supervisorSigPad ? supervisorSigPad.toDataURL() : null;
+
+    signatures = {
+        inspector: inspData,
+        supervisor: supData,
+        signedAt: new Date().toISOString()
+    };
+    InspectionEngine.safeSetJSON('pdi-signatures', signatures);
+    closeSignOffModal();
+    showToast('✍️ Signatures recorded', 'success');
+    exportPDF();
+}
+
+// ─── CAMERA QR / BARCODE SCANNER ───
+function openQrScanner() {
+    document.getElementById('qrScannerModalOverlay').classList.add('open');
+    const video = document.getElementById('qrVideo');
+    const status = document.getElementById('qrScannerStatus');
+
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+            .then((stream) => {
+                qrStream = stream;
+                video.srcObject = stream;
+                video.play();
+                status.textContent = 'Camera active. Point at barcode/QR code.';
+            })
+            .catch(() => {
+                status.textContent = 'Camera unavailable. Use manual input below.';
+            });
+    } else {
+        status.textContent = 'Camera access not supported on this device.';
+    }
+}
+
+function closeQrScanner() {
+    if (qrStream) {
+        qrStream.getTracks().forEach(track => track.stop());
+        qrStream = null;
+    }
+    document.getElementById('qrScannerModalOverlay').classList.remove('open');
+}
+
+function applyManualVin() {
+    const input = document.getElementById('manualVinInput');
+    if (!input || !input.value.trim()) return;
+    const val = input.value.trim();
+    inspectionMeta.vin = val;
+    populateMetaFields();
+    saveInspectionMeta();
+    closeQrScanner();
+    showToast(`🚘 VIN recorded: ${val}`, 'success');
+}
+
+// ─── PDF PRINT REPORT GENERATION ───
+function exportPDF() {
+    saveInspectionMeta();
+    if (!inspectionMeta.inspectionId || !inspectionMeta.vin || !inspectionMeta.registration) {
+        showToast('⚠️ Please ensure Inspection ID, VIN, and Registration are entered', 'error');
+        openInspectionInfoIfNeeded();
+        return;
+    }
+
+    const reportContainer = document.getElementById('printReport');
+    reportContainer.innerHTML = generatePrintReport();
+
+    // Trigger native browser print which formats to multi-page PDF
+    window.print();
+    showToast('📄 PDF print dialog launched', 'info');
+}
+
+function generatePrintReport() {
+    const allGroups = buildGroups();
+    const counters = InspectionEngine.computeCounters(inspectionItems);
+    const failedItems = inspectionItems.filter(i => i.status === 'FAIL');
+
+    let finalResult = 'PASS';
+    let finalResultClass = 'pass';
+    if (counters.failed > 0) {
+        finalResult = 'DEFECTS DETECTED (FAIL)';
+        finalResultClass = 'fail';
+    } else if (counters.pending > 0) {
+        finalResult = 'INCOMPLETE INSPECTION';
+        finalResultClass = 'pending';
+    }
+
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+
+    let metaItemsHtml = '';
+    if (inspectionMeta.inspectionId) metaItemsHtml += `<div class="report-meta-item"><span>Inspection ID:</span><strong>${escapeHtml(inspectionMeta.inspectionId)}</strong></div>`;
+    if (inspectionMeta.registration) metaItemsHtml += `<div class="report-meta-item"><span>Registration No:</span><strong>${escapeHtml(inspectionMeta.registration)}</strong></div>`;
+    if (inspectionMeta.vin) metaItemsHtml += `<div class="report-meta-item"><span>VIN / Chassis:</span><strong>${escapeHtml(inspectionMeta.vin)}</strong></div>`;
+    if (inspectionMeta.model) metaItemsHtml += `<div class="report-meta-item"><span>Vehicle Model:</span><strong>${escapeHtml(inspectionMeta.model)}</strong></div>`;
+    if (inspectionMeta.customer) metaItemsHtml += `<div class="report-meta-item"><span>Customer / Fleet:</span><strong>${escapeHtml(inspectionMeta.customer)}</strong></div>`;
+    if (inspectionMeta.inspector) metaItemsHtml += `<div class="report-meta-item"><span>Inspector:</span><strong>${escapeHtml(inspectionMeta.inspector)}</strong></div>`;
+    metaItemsHtml += `<div class="report-meta-item"><span>Date &amp; Time:</span><strong>${escapeHtml(inspectionMeta.date || dateStr)} ${timeStr}</strong></div>`;
+    if (inspectionMeta.location) metaItemsHtml += `<div class="report-meta-item"><span>Location / Depot:</span><strong>${escapeHtml(inspectionMeta.location)}</strong></div>`;
+
+    // Calculate Active Time
+    const timerState = timer.load() || { startedAt: Date.now(), pausedAccumMs: 0 };
+    const totalActiveSecs = Math.floor((Date.now() - timerState.startedAt - (timerState.pausedAccumMs || 0)) / 1000);
+    const activeMins = Math.floor(totalActiveSecs / 60);
+    const activeSecs = totalActiveSecs % 60;
+    metaItemsHtml += `<div class="report-meta-item"><span>Total Active Time:</span><strong>${activeMins}m ${activeSecs}s</strong></div>`;
+
+    let html = `
+        <div class="report-page">
+            <!-- Header Block -->
+            <div class="report-header-block">
+                <div class="report-header-text">
+                    <h1>BUSTECH ENGINEERING · PDI INSPECTION REPORT</h1>
+                    <p>Static Chassis &amp; Systems Pre-Delivery Quality Verification</p>
+                </div>
+                <img src="../bustech-logo.png" alt="BusTech Logo" class="report-logo" style="mix-blend-mode:multiply;"/>
+            </div>
+
+            <!-- Vehicle & Meta Information -->
+            <div class="report-meta-grid">
+                ${metaItemsHtml}
+            </div>
+
+            <!-- Summary Scorecard -->
+            <div class="report-summary-bar">
+                <div class="report-summary-card">Total Checkpoints: <strong>${counters.total}</strong></div>
+                <div class="report-summary-card pass">PASSED: <strong>${counters.passed}</strong></div>
+                <div class="report-summary-card fail">FAILED: <strong>${counters.failed}</strong></div>
+                <div class="report-summary-card">OVERALL: <strong style="color:${finalResultClass === 'pass' ? '#10B981' : '#EF4444'}">${finalResult}</strong></div>
+            </div>
+    `;
+
+    // High-Priority Failure Defect Box
+    if (failedItems.length > 0) {
+        html += `
+            <div class="report-defect-box">
+                <h3>⚠️ DEFECT HIGHLIGHT SUMMARY (${failedItems.length} Faults Requiring Rectification)</h3>
+                <table class="report-table">
+                    <thead>
+                        <tr>
+                            <th>Item Code</th>
+                            <th>Assembly</th>
+                            <th>Checkpoint Description</th>
+                            <th>Observations / Remarks</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        failedItems.forEach((f) => {
+            html += `
+                <tr>
+                    <td style="font-family:monospace;font-weight:700;">${escapeHtml(f.pdc)}</td>
+                    <td>${escapeHtml(f.adc)}</td>
+                    <td><strong>${escapeHtml(f.picp)}</strong></td>
+                    <td style="color:#B91C1C;font-weight:600;">${escapeHtml(f.remarks || 'No remarks recorded')}</td>
+                </tr>
+            `;
+        });
+        html += `</tbody></table></div>`;
+    }
+
+    // Full Inspection Checklist Breakdown
+    html += `<div class="report-section-title">Comprehensive Inspection Checklist</div>`;
+    for (const group of allGroups) {
+        html += `
+            <div style="margin-bottom:10px;page-break-inside:avoid;">
+                <div style="font-weight:700;font-size:8.5pt;background:#F1F5F9;padding:4px 8px;border:1px solid #CBD5E1;border-bottom:none;">
+                    ${escapeHtml(group.adc)} (${group.passCount} Pass / ${group.failCount} Fail / ${group.pendCount} Pending)
+                </div>
+                <table class="report-table" style="margin-bottom:8px;">
+                    <thead>
+                        <tr>
+                            <th style="width:18%;">Code</th>
+                            <th style="width:38%;">Checkpoint &amp; Spec</th>
+                            <th style="width:12%;">Method</th>
+                            <th style="width:10%;">Status</th>
+                            <th style="width:22%;">Remarks</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+        for (const item of group.items) {
+            const st = item.status || 'PENDING';
+            const badgeClass = item.status === 'PASS' ? 'pass' : (item.status === 'FAIL' ? 'fail' : 'pending');
+            html += `
+                <tr>
+                    <td style="font-family:monospace;">${escapeHtml(item.pdc)}</td>
+                    <td><strong>${escapeHtml(item.picp)}</strong><br/><span style="color:#64748B;">Spec: ${escapeHtml(item.spec)}</span></td>
+                    <td>${escapeHtml(item.method)}</td>
+                    <td><span class="report-badge ${badgeClass}">${st}</span></td>
+                    <td>${escapeHtml(item.remarks || '-')}</td>
+                </tr>
+            `;
+        }
+        html += `</tbody></table></div>`;
+    }
+
+    // Photo Evidence Gallery
+    const itemsWithPhotos = inspectionItems.filter(i => i.photo);
+    if (itemsWithPhotos.length > 0) {
+        html += `
+            <div class="report-section-title" style="page-break-before:always;">Photographic Evidence Gallery</div>
+            <div class="report-evidence-grid">
+        `;
+        for (const item of itemsWithPhotos) {
+            html += `
+                <div class="report-evidence-card">
+                    <img src="${item.photo}" alt="Evidence for ${escapeHtml(item.picp)}" />
+                    <div style="font-size:8pt;">
+                        <strong>${escapeHtml(item.pdc)}</strong>: ${escapeHtml(item.picp)}
+                        <br/>
+                        <span class="report-badge ${item.status === 'FAIL' ? 'fail' : 'pass'}">${item.status}</span>
+                        ${item.remarks ? `<br/><em>${escapeHtml(item.remarks)}</em>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+        html += `</div>`;
+    }
+
+    // Session Activity Logs
+    const pauseLogs = InspectionEngine.safeGetJSON('pdi-pause-logs', []);
+    if (pauseLogs.length > 0) {
+        html += `<div class="report-section-title">Session Activity &amp; Pause Logs</div>`;
+        html += `<table class="report-table" style="width:100%;max-width:500px;margin-bottom:12px;">
+                    <thead><tr><th>Time</th><th>Action / Event</th></tr></thead>
+                    <tbody>`;
+        pauseLogs.forEach(log => {
+            html += `<tr><td>${log.timestamp}</td><td>${log.action}</td></tr>`;
+        });
+        html += `</tbody></table>`;
+    }
+
+    // Electronic Signatures Block
+    html += `
+        <div class="report-signatures" style="display:flex;align-items:flex-end;justify-content:space-between;border-top:2px solid #E2E8F0;padding-top:16px;">
+            <div style="display:flex;gap:40px;">
+                <div class="report-signature-block">
+                    ${signatures.inspector ? `<img src="${signatures.inspector}" alt="Inspector Signature" />` : '<div style="height:50px;"></div>'}
+                    <div><strong>Inspector Sign-Off:</strong> ${escapeHtml(inspectionMeta.inspector || 'Certified Inspector')}</div>
+                    <div style="font-size:7.5pt;color:#64748B;">I hereby certify that all static checkpoints have been individually evaluated.</div>
+                </div>
+                <div class="report-signature-block">
+                    ${signatures.supervisor ? `<img src="${signatures.supervisor}" alt="Supervisor Signature" />` : '<div style="height:50px;"></div>'}
+                    <div><strong>Quality Assurance / Supervisor:</strong> Authorized Signatory</div>
+                    <div style="font-size:7.5pt;color:#64748B;">Inspection report verified and archived in quality audit records.</div>
+                </div>
+            </div>
+            <div class="report-signature-brand">
+                <img src="../bustech-logo.png" alt="BusTech Engineering" style="height:50px;mix-blend-mode:multiply;" />
+            </div>
+        </div>
+    `;
+
+    html += `</div>`;
+    return html;
 }
 
 // ─── EVENTS ───
 function setupEventListeners() {
     const searchInput = document.getElementById('searchInput');
-    const debouncedRender = InspectionEngine.debounce(renderGroups, 250);
+    const debouncedRender = InspectionEngine.debounce(renderGroups, 200);
     searchInput.addEventListener('input', (e) => {
         searchQuery = e.target.value;
         debouncedRender();
     });
 
-    document.querySelectorAll('.filter-tabs .tab').forEach(tab => {
+    document.querySelectorAll('.filter-tabs .tab').forEach((tab) => {
         tab.addEventListener('click', () => {
-            document.querySelectorAll('.filter-tabs .tab').forEach(t => {
+            document.querySelectorAll('.filter-tabs .tab').forEach((t) => {
                 t.classList.remove('active');
                 t.setAttribute('aria-pressed', 'false');
             });
             tab.classList.add('active');
             tab.setAttribute('aria-pressed', 'true');
-            const map = { 'All': 'all', 'Pass': 'pass', 'Fail': 'fail', 'Pending': 'pending' };
-            currentFilter = map[tab.textContent.trim()] || 'all';
+            currentFilter = tab.getAttribute('data-filter') || 'all';
             renderGroups();
         });
     });
@@ -904,59 +1448,27 @@ function showToast(message, type = 'info') {
     container.appendChild(toast);
     setTimeout(() => {
         if (toast.parentElement) toast.remove();
-    }, 5000);
+    }, 4500);
 }
 
 // ─── MODAL ───
 let modalCallback = null;
-
 function openModal(title, message, onConfirm, options = {}) {
     document.getElementById('modalTitle').textContent = title;
-    const modalMessageEl = document.getElementById('modalMessage');
-    modalMessageEl.innerHTML = message;
+    document.getElementById('modalMessage').innerHTML = message;
     document.getElementById('modalOverlay').classList.add('open');
     modalCallback = onConfirm;
     modalPreviouslyFocused = document.activeElement;
+
     const confirmBtn = document.getElementById('modalConfirmBtn');
     const cancelBtn = document.querySelector('#modalOverlay .modal-actions .btn-outline');
 
-    // Customize button text
     confirmBtn.textContent = options.confirmText || 'Confirm';
     cancelBtn.textContent = options.cancelText || 'Cancel';
 
-    if (options.requirePhoto) {
-        confirmBtn.disabled = true;
-        confirmBtn.setAttribute('aria-disabled', 'true');
-        const modalInput = document.getElementById('modal-photo-input');
-        const preview = document.getElementById('modal-photo-preview');
-        if (modalInput) {
-            const changeHandler = (e) => {
-                const f = e.target.files[0];
-                if (!f) return;
-                compressImage(f, (compressedBase64) => {
-                    // Use pending callback if available, don't mutate item directly
-                    if (options.onPendingPhoto) {
-                        options.onPendingPhoto(compressedBase64);
-                    }
-                    if (preview) {
-                        preview.src = compressedBase64;
-                        preview.style.display = 'block';
-                    }
-                    confirmBtn.disabled = false;
-                    confirmBtn.removeAttribute('aria-disabled');
-                });
-            };
-            modalInput.addEventListener('change', changeHandler);
-        }
-    } else {
-        confirmBtn.disabled = false;
-        confirmBtn.removeAttribute('aria-disabled');
-    }
-
-    const callback = modalCallback;
     confirmBtn.onclick = () => {
         closeModal();
-        if (callback) callback();
+        if (modalCallback) modalCallback();
     };
     cancelBtn.onclick = () => {
         closeModal();
@@ -970,301 +1482,17 @@ function closeModal() {
     document.getElementById('modalOverlay').classList.remove('open');
     modalCallback = null;
     document.removeEventListener('keydown', handleModalKeydown);
-    if (modalPreviouslyFocused && modalPreviouslyFocused.focus) {
-        modalPreviouslyFocused.focus();
-    }
+    if (modalPreviouslyFocused && modalPreviouslyFocused.focus) modalPreviouslyFocused.focus();
 }
 
 function handleModalKeydown(event) {
     if (event.key === 'Escape') {
         event.preventDefault();
         closeModal();
-        return;
-    }
-    if (event.key !== 'Tab') return;
-
-    const modal = document.querySelector('#modalOverlay .modal');
-    const focusable = Array.from(modal.querySelectorAll('button'));
-    if (focusable.length === 0) return;
-
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const activeElement = document.activeElement;
-
-    if (event.shiftKey && activeElement === first) {
-        event.preventDefault();
-        last.focus();
-    } else if (!event.shiftKey && activeElement === last) {
-        event.preventDefault();
-        first.focus();
     }
 }
 
-// ─── EXPORT / IMPORT ───
-function exportPDF() {
-    // Save latest metadata
-    saveInspectionMeta();
-
-    // Validate metadata
-    if (!inspectionMeta.inspectionId) {
-        showToast('⚠️ Please ensure inspection info is filled', 'error');
-        return;
-    }
-
-    // Generate complete report regardless of UI state
-    const reportContainer = document.getElementById('printReport');
-    reportContainer.innerHTML = generatePrintReport();
-
-    // Trigger print
-    window.print();
-    showToast('📄 PDF print dialog opened', 'info');
-}
-
-function generatePrintReport() {
-    const allGroups = buildGroups(); // Always use ALL data
-    const total = inspectionItems.length;
-    const passed = inspectionItems.filter(i => i.status === 'PASS').length;
-    const failed = inspectionItems.filter(i => i.status === 'FAIL').length;
-    const pending = total - passed - failed;
-
-    let finalResult = 'INCOMPLETE';
-    let finalResultClass = 'result-pending';
-    if (pending === 0 && failed === 0) {
-        finalResult = 'PASS';
-        finalResultClass = 'result-pass';
-    } else if (failed > 0) {
-        finalResult = 'FAIL';
-        finalResultClass = 'result-fail';
-    }
-
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' });
-    const timeStr = now.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
-
-    let html = `
-        <div class="report-page">
-            <div class="report-header-block">
-                <img src="bustech-logo.png" alt="BusTech Logo" class="report-logo" />
-                <h1>PDI ROAD TEST / VEHICLE INSPECTION REPORT</h1>
-                <div class="report-meta-line">
-                    <span>Inspection ID: <strong>${escapeHtml(inspectionMeta.inspectionId)}</strong></span>
-                    <span>Date: <strong>${escapeHtml(inspectionMeta.date || dateStr)}</strong></span>
-                    <span>Time: <strong>${timeStr}</strong></span>
-                    <span>Inspector: <strong>${escapeHtml(inspectionMeta.inspector || 'N/A')}</strong></span>
-                </div>
-            </div>
-
-            <div class="report-section">
-                <h2>Vehicle Information</h2>
-                <table class="report-info-table">
-                    <tr><td>Registration Number</td><td>${escapeHtml(inspectionMeta.registration || 'N/A')}</td></tr>
-                    <tr><td>VIN / Chassis Number</td><td>${escapeHtml(inspectionMeta.vin || 'N/A')}</td></tr>
-                    <tr><td>Vehicle Model</td><td>${escapeHtml(inspectionMeta.model || 'N/A')}</td></tr>
-                    <tr><td>Customer / Company</td><td>${escapeHtml(inspectionMeta.customer || 'N/A')}</td></tr>
-                    <tr><td>Inspection Location</td><td>${escapeHtml(inspectionMeta.location || 'N/A')}</td></tr>
-                </table>
-            </div>
-
-            <div class="report-section">
-                <h2>Inspection Summary</h2>
-                <div class="report-summary-grid">
-                    <div class="report-summary-item">Total Checkpoints: <strong>${total}</strong></div>
-                    <div class="report-summary-item report-pass">PASS: <strong>${passed}</strong></div>
-                    <div class="report-summary-item report-fail">FAIL: <strong>${failed}</strong></div>
-                    <div class="report-summary-item report-pending">PENDING: <strong>${pending}</strong></div>
-                </div>
-                <div class="report-final-result ${finalResultClass}">
-                    FINAL RESULT: <strong>${finalResult}</strong>
-                </div>
-            </div>
-    `;
-
-    // Inspection details - ALL groups
-    html += `<div class="report-section"><h2>Inspection Details</h2>`;
-    for (const group of allGroups) {
-        html += `<div class="report-group">
-            <h3 class="report-group-title">${escapeHtml(group.adc)}</h3>
-            <div class="report-group-stats">
-                Pass: ${group.passCount} | Fail: ${group.failCount} | Pending: ${group.pendCount}
-            </div>`;
-        for (const item of group.items) {
-            const statusText = item.status || 'PENDING';
-            const statusClass = item.status === 'PASS' ? 'status-pass' : item.status === 'FAIL' ? 'status-fail' : 'status-pending';
-            html += `<div class="report-checkpoint">
-                <div class="report-checkpoint-header">
-                    <span class="report-pdc">${escapeHtml(item.pdc)}</span>
-                    <span class="report-status ${statusClass}">${statusText}</span>
-                </div>
-                <div class="report-checkpoint-desc">${escapeHtml(item.picp)}</div>
-                <div class="report-checkpoint-detail">
-                    <span>Method: ${escapeHtml(item.method)}</span>
-                    <span>Spec: ${escapeHtml(item.spec)}</span>
-                </div>`;
-            if (item.remarks) {
-                html += `<div class="report-remarks">Remarks: ${escapeHtml(item.remarks)}</div>`;
-            }
-            if (item.photo) {
-                html += `<div class="report-evidence-photo"><img src="${item.photo}" alt="Evidence photo" /></div>`;
-            } else if (item.status === 'FAIL') {
-                html += `<div class="report-no-photo">⚠️ Evidence photo missing</div>`;
-            }
-            html += `</div>`;
-        }
-        html += `</div>`;
-    }
-    html += `</div>`;
-
-    // Failure evidence summary section
-    const failedItems = inspectionItems.filter(i => i.status === 'FAIL');
-    if (failedItems.length > 0) {
-        html += `<div class="report-section report-evidence-section">
-            <h2>Failure Evidence Summary</h2>`;
-        for (const item of failedItems) {
-            html += `<div class="report-evidence-block">
-                <div class="report-evidence-header">
-                    <span class="report-status status-fail">FAIL</span>
-                    <strong>${escapeHtml(item.picp)}</strong>
-                    <span class="report-pdc">${escapeHtml(item.pdc)}</span>
-                </div>`;
-            if (item.remarks) {
-                html += `<div class="report-remarks">Remark: ${escapeHtml(item.remarks)}</div>`;
-            }
-            if (item.photo) {
-                html += `<div class="report-evidence-photo"><img src="${item.photo}" alt="Evidence" /></div>`;
-            } else {
-                html += `<div class="report-no-photo">⚠️ Evidence photo missing</div>`;
-            }
-            html += `</div>`;
-        }
-        html += `</div>`;
-    }
-
-    // Footer
-    html += `
-            <div class="report-footer">
-                <div>Inspection ID: ${escapeHtml(inspectionMeta.inspectionId)} | Generated: ${dateStr} ${timeStr}</div>
-                <div>Registration: ${escapeHtml(inspectionMeta.registration || 'N/A')} | VIN: ${escapeHtml(inspectionMeta.vin || 'N/A')}</div>
-            </div>
-        </div>
-    `;
-    return html;
-}
-
-function exportCSV() {
-    const rows = [['PDC', 'ADC', 'SADC', 'PLDC', 'Checkpoint', 'Method', 'Spec', 'Status', 'Remarks']];
-    inspectionItems.forEach(item => {
-        rows.push([item.pdc, item.adc, item.sadc, item.pldc, item.picp, item.method, item.spec, item.status || 'PENDING', item.remarks]);
-    });
-    const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `PDI_Report_${new Date().toISOString().slice(0,10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-    showToast('📊 CSV exported', 'success');
-}
-
-function saveJSON() {
-    saveInspectionMeta();
-    const data = JSON.stringify({
-        inspectionId: inspectionMeta.inspectionId,
-        vehicle: {
-            registration: inspectionMeta.registration,
-            vin: inspectionMeta.vin,
-            model: inspectionMeta.model,
-            customer: inspectionMeta.customer
-        },
-        inspector: {
-            name: inspectionMeta.inspector
-        },
-        date: inspectionMeta.date,
-        location: inspectionMeta.location,
-        items: inspectionItems
-    }, null, 2);
-    const blob = new Blob([data], { type: 'application/json' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `PDI_Save_${inspectionMeta.inspectionId || new Date().toISOString().slice(0,10)}.json`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-    showToast('💾 Editable JSON saved', 'success');
-}
-
-function importJSON(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        try {
-            const imported = JSON.parse(e.target.result);
-
-            // Support new format with metadata
-            if (imported && typeof imported === 'object' && !Array.isArray(imported) && Array.isArray(imported.items)) {
-                // Validate items structure
-                if (!validateItems(imported.items)) {
-                    showToast('❌ Invalid inspection items in file', 'error');
-                    return;
-                }
-                inspectionItems = imported.items;
-                // Restore metadata
-                if (imported.inspectionId) inspectionMeta.inspectionId = imported.inspectionId;
-                if (imported.vehicle) {
-                    inspectionMeta.registration = imported.vehicle.registration || '';
-                    inspectionMeta.vin = imported.vehicle.vin || '';
-                    inspectionMeta.model = imported.vehicle.model || '';
-                    inspectionMeta.customer = imported.vehicle.customer || '';
-                }
-                if (imported.inspector) {
-                    inspectionMeta.inspector = imported.inspector.name || '';
-                }
-                if (imported.date) inspectionMeta.date = imported.date;
-                if (imported.location) inspectionMeta.location = imported.location;
-                populateMetaFields();
-                saveInspectionMeta();
-            } else if (Array.isArray(imported) && imported.length > 0) {
-                // Legacy format - just items array
-                if (!validateItems(imported)) {
-                    showToast('❌ Invalid file format', 'error');
-                    return;
-                }
-                inspectionItems = imported;
-            } else {
-                showToast('❌ Invalid file format', 'error');
-                return;
-            }
-            saveToLocalStorage();
-            renderGroups();
-            updateStats();
-            showToast('📂 Data loaded successfully', 'success');
-        } catch (err) {
-            showToast('❌ Error parsing file', 'error');
-        }
-    };
-    reader.readAsText(file);
-    event.target.value = '';
-}
-
-function validateItems(items) {
-    if (!Array.isArray(items) || items.length === 0) return false;
-    // Check first item has expected fields
-    const first = items[0];
-    if (first.id === undefined || typeof first.pdc !== 'string' || typeof first.adc !== 'string') {
-        return false;
-    }
-    // Ensure no items have unexpected executable content
-    for (const item of items) {
-        if (typeof item.id !== 'number') return false;
-        if (typeof item.status !== 'string' && item.status !== undefined && item.status !== '') return false;
-    }
-    return true;
-}
-
-// ─── UTILITIES ───
-function scanQR() {
-    showToast('📷 QR scanner placeholder (html5-qrcode integration ready)', 'info');
-}
-
+// ─── THEME ───
 function getStoredTheme() {
     return localStorage.getItem('pdi-theme') || 'light';
 }
@@ -1273,161 +1501,73 @@ function applyTheme(theme) {
     const isDark = theme === 'dark';
     document.body.setAttribute('data-theme', isDark ? 'dark' : 'light');
     localStorage.setItem('pdi-theme', theme);
-
     const icon = document.querySelector('.app-header .header-actions button[title="Theme"] i');
-    if (icon) {
-        icon.className = isDark ? 'fas fa-sun' : 'fas fa-moon';
-    }
+    if (icon) icon.className = isDark ? 'fas fa-sun' : 'fas fa-moon';
 }
 
 function toggleDarkMode() {
-    const nextTheme = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-    applyTheme(nextTheme);
+    const next = document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
     renderGroups();
-    showToast(nextTheme === 'dark' ? '🌙 Dark mode enabled' : '☀️ Light mode enabled', 'info');
+    showToast(next === 'dark' ? '🌙 Dark mode enabled' : '☀️ Light mode enabled', 'info');
 }
 
 function initTheme() {
     applyTheme(getStoredTheme());
 }
 
-// ─── COUNTDOWN TIMER LOGIC (2 HOURS) ───
-function initTimer() {
-    const savedEndTime = localStorage.getItem('pdi-timer-end-time');
-    const savedLeftTime = localStorage.getItem('pdi-timer-left');
-    const savedIsRunning = localStorage.getItem('pdi-timer-is-running');
+// ─── TIMER CONTROLS ───
+function updateTimerDisplay(displayMs) {
+    const totalSecs = Math.floor(displayMs / 1000);
+    const hrs = Math.floor(totalSecs / 3600);
+    const mins = Math.floor((totalSecs % 3600) / 60);
+    const secs = totalSecs % 60;
+    const str = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 
-    if (savedEndTime && savedIsRunning === 'true') {
-        const end = parseInt(savedEndTime, 10);
-        const left = Math.max(0, Math.floor((end - Date.now()) / 1000));
-        timerSecondsLeft = left;
-        if (left > 0) {
-            startTimerInterval();
-        } else {
-            timerSecondsLeft = 0;
-            updateTimerDisplay();
-            handleTimerExpiry();
-        }
-    } else if (savedLeftTime) {
-        timerSecondsLeft = parseInt(savedLeftTime, 10);
-        isTimerRunning = false;
-        updateTimerDisplay();
-        updateTimerControls();
-    } else {
-        timerSecondsLeft = 7200; // 2 hours
-        isTimerRunning = false;
-        updateTimerDisplay();
-        updateTimerControls();
+    const displayEl = document.getElementById('timerDisplay');
+    if (displayEl) displayEl.textContent = str;
+
+    const timerWidget = document.getElementById('headerTimer');
+    if (timerWidget) {
+        if (totalSecs <= 0) timerWidget.className = 'header-timer danger';
+        else if (totalSecs < 900) timerWidget.className = 'header-timer warning';
+        else timerWidget.className = 'header-timer';
     }
-}
-
-function startTimerInterval() {
-    if (timerInterval) clearInterval(timerInterval);
-    isTimerRunning = true;
-    localStorage.setItem('pdi-timer-is-running', 'true');
-    const endTime = Date.now() + timerSecondsLeft * 1000;
-    localStorage.setItem('pdi-timer-end-time', endTime);
-    localStorage.removeItem('pdi-timer-left');
-
-    timerInterval = setInterval(() => {
-        const end = parseInt(localStorage.getItem('pdi-timer-end-time'), 10);
-        const left = Math.max(0, Math.floor((end - Date.now()) / 1000));
-        timerSecondsLeft = left;
-        updateTimerDisplay();
-
-        if (left <= 0) {
-            clearInterval(timerInterval);
-            timerInterval = null;
-            isTimerRunning = false;
-            localStorage.setItem('pdi-timer-is-running', 'false');
-            handleTimerExpiry();
-        }
-    }, 1000);
-    updateTimerControls();
-}
-
-function stopTimerInterval() {
-    if (timerInterval) {
-        clearInterval(timerInterval);
-        timerInterval = null;
-    }
-    isTimerRunning = false;
-    localStorage.setItem('pdi-timer-is-running', 'false');
-    localStorage.setItem('pdi-timer-left', timerSecondsLeft);
-    localStorage.removeItem('pdi-timer-end-time');
-    updateTimerControls();
 }
 
 function toggleTimer() {
-    if (isTimerRunning) {
-        stopTimerInterval();
-        showToast('⏸️ Timer paused', 'info');
+    const state = timer.load();
+    const controlBtn = document.getElementById('timerControlBtn');
+    if (!state || state.pausedAt) {
+        timer.resume();
+        if (controlBtn) controlBtn.innerHTML = '<i class="fas fa-pause"></i>';
+        showToast('▶️ Timer running', 'info');
+        
+        // Log Resume Event
+        const logs = InspectionEngine.safeGetJSON('pdi-pause-logs', []);
+        logs.push({ action: 'Resumed Inspection', timestamp: new Date().toLocaleTimeString() });
+        InspectionEngine.safeSetJSON('pdi-pause-logs', logs);
     } else {
-        if (timerSecondsLeft <= 0) {
-            timerSecondsLeft = 7200;
-        }
-        startTimerInterval();
-        showToast('▶️ Timer started', 'info');
+        timer.pause();
+        if (controlBtn) controlBtn.innerHTML = '<i class="fas fa-play"></i>';
+        showToast('⏸️ Timer paused', 'info');
+        
+        // Log Pause Event
+        const logs = InspectionEngine.safeGetJSON('pdi-pause-logs', []);
+        logs.push({ action: 'Paused Inspection', timestamp: new Date().toLocaleTimeString() });
+        InspectionEngine.safeSetJSON('pdi-pause-logs', logs);
     }
 }
 
 function resetTimer() {
-    if (timerInterval) clearInterval(timerInterval);
-    timerInterval = null;
-    timerSecondsLeft = 7200;
-    isTimerRunning = false;
-    localStorage.setItem('pdi-timer-is-running', 'false');
-    localStorage.setItem('pdi-timer-left', timerSecondsLeft);
-    localStorage.removeItem('pdi-timer-end-time');
-    updateTimerDisplay();
-    updateTimerControls();
-}
-
-function updateTimerDisplay() {
-    const hrs = Math.floor(timerSecondsLeft / 3600);
-    const mins = Math.floor((timerSecondsLeft % 3600) / 60);
-    const secs = timerSecondsLeft % 60;
-    const displayStr = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-    
-    const displayEl = document.getElementById('timerDisplay');
-    if (displayEl) {
-        displayEl.textContent = displayStr;
-    }
-
-    const timerWidget = document.getElementById('headerTimer');
-    if (timerWidget) {
-        if (timerSecondsLeft <= 0) {
-            timerWidget.className = 'header-timer danger';
-        } else if (timerSecondsLeft < 900) { // < 15 mins
-            timerWidget.className = 'header-timer warning';
-        } else {
-            timerWidget.className = 'header-timer';
-        }
-    }
-}
-
-function updateTimerControls() {
+    timer.resetTimer();
+    timer.start();
     const controlBtn = document.getElementById('timerControlBtn');
-    if (controlBtn) {
-        controlBtn.innerHTML = isTimerRunning ? '<i class="fas fa-pause"></i>' : '<i class="fas fa-play"></i>';
-        controlBtn.title = isTimerRunning ? 'Pause Timer' : 'Resume Timer';
-    }
+    if (controlBtn) controlBtn.innerHTML = '<i class="fas fa-pause"></i>';
 }
 
 function handleTimerExpiry() {
-    showToast('🚨 PDI Road Test inspection time has expired!', 'error');
-    openModal('Time Expired', `
-        <p>The 2-hour countdown has ended. Please finalize your report as soon as possible.</p>
-    `, null, { confirmText: 'Acknowledge' });
-}
-
-// ─── SERVICE WORKER REGISTRATION ───
-if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./service-worker.js')
-            .then(reg => console.log('Service Worker registered successfully!', reg.scope))
-            .catch(err => console.log('Service Worker registration failed:', err));
-    });
+    showToast('🚨 PDI inspection time has expired!', 'error');
 }
 
 // ─── START ───
