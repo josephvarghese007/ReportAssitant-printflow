@@ -35,7 +35,7 @@ jobs:
       - name: Prepare Static Site Artifact
         run: |
           mkdir _site
-          cp index.html style.css script.js manifest.json service-worker.js _site/
+          cp index.html style.css inspection-engine.js manifest.json service-worker.js _site/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
