@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="theme-color" content="#0057B8">
+<title>BusTech Engineering · Road Test PDI</title>
+<link rel="icon" href="../bustech-logo.png" type="image/png">
+<link rel="stylesheet" href="./road-test.css">
+</head>
+<body>
+<header class="rt-header"><div class="rt-header-inner">
+<a class="brand" href="../"><img src="../bustech-logo.png" alt="BusTech Engineering"><div><strong>BusTech Engineering</strong><span>Road Test PDI</span></div></a>
+<div class="header-actions"><a class="icon-btn" href="../" aria-label="Back to dashboard">←</a><button class="icon-btn" id="themeBtn" type="button">☾</button></div>
+</div></header>
+<main class="rt-shell">
+<section class="session-card">
+<div class="section-title-row"><div><span class="eyebrow">ROAD TEST</span><h1>Level-2 Road Test Inspection</h1></div><span class="session-badge" id="sessionBadge">NEW</span></div>
+<div id="missingSession" class="notice hidden"><strong>Inspection information not found.</strong><span>Enter the vehicle information below, or return to the PDI Dashboard.</span></div>
+<div class="info-grid" id="inspectionInfo">
+<label>Inspection ID<input id="inspectionId" type="text" placeholder="PDI-2026-001"></label>
+<label>Registration Number<input id="registration" type="text" placeholder="KL-07-AB-1234"></label>
+<label>VIN / Chassis Number<input id="vin" type="text" placeholder="VIN / chassis number"></label>
+<label>Vehicle Model<input id="model" type="text" placeholder="Vehicle model"></label>
+<label>Customer / Company<input id="customer" type="text" placeholder="Customer / company"></label>
+<label>Inspector<input id="inspector" type="text" placeholder="Inspector name / ID"></label>
+<label>Date<input id="date" type="date"></label>
+<label>Location<input id="location" type="text" placeholder="Inspection location"></label>
+</div>
+<div class="info-actions"><button class="btn secondary" id="saveInfoBtn" type="button">Save Inspection Info</button><a class="btn ghost" href="../">← Back to PDI Dashboard</a></div>
+</section>
+<section class="progress-card">
+<div class="stats"><div><span>Total</span><strong id="totalCount">442</strong></div><div><span>Completed</span><strong id="completedCount">0</strong></div><div><span>Passed</span><strong class="pass-text" id="passedCount">0</strong></div><div><span>Failed</span><strong class="fail-text" id="failedCount">0</strong></div><div><span>Remaining</span><strong id="remainingCount">442</strong></div></div>
+<div class="progress-track"><div id="progressBar"></div></div><div class="progress-meta"><span id="progressText">0% complete</span><span id="autosaveText">Ready</span></div>
+</section>
+<section class="controls-card">
+<div class="controls-row">
+<label class="search-box">⌕<input id="searchInput" type="search" placeholder="Search check, PDC, category, method..." autocomplete="off"></label>
+<label class="select-box">Category<select id="categorySelect"></select></label>
+<label class="select-box">Status<select id="statusFilter"><option value="ALL">All checks</option><option value="PENDING">Unanswered</option><option value="PASS">Passed</option><option value="FAIL">Failed</option><option value="NA">Not Applicable</option></select></label>
+</div>
+<div class="category-strip" id="categoryStrip"></div>
+</section>
+<section class="checklist-card">
+<div class="category-heading"><div><span class="eyebrow" id="categoryCode">CATEGORY</span><h2 id="categoryTitle">VIN Registration Plate</h2><p id="categoryMeta"></p></div><div class="category-nav"><button class="btn secondary" id="prevCategory" type="button">← Previous</button><button class="btn primary" id="nextCategory" type="button">Next →</button></div></div>
+<div id="searchSummary" class="search-summary hidden"></div><div id="checkList" class="check-list"></div><div id="emptyState" class="empty hidden">No checks match the current filter.</div>
+</section>
+<section class="completion-card">
+<div><span class="eyebrow">FINAL SUMMARY</span><h2>Complete Road Test</h2><p>Review the counts before completing. Unanswered checks are never silently marked as passed.</p></div>
+<div class="summary-grid"><div><span>Passed</span><strong id="summaryPassed">0</strong></div><div><span>Failed</span><strong id="summaryFailed">0</strong></div><div><span>Not Applicable</span><strong id="summaryNA">0</strong></div><div><span>Unanswered</span><strong id="summaryUnanswered">442</strong></div></div>
+<button class="btn primary large" id="completeBtn" type="button">Complete Road Test</button>
+</section>
+</main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<dialog id="completeDialog"><div class="dialog-inner"><button class="dialog-close" id="closeDialog" type="button">×</button><span class="eyebrow">COMPLETION CHECK</span><h2>Finish Road Test?</h2><div id="dialogSummary"></div><p id="dialogWarning"></p><div class="dialog-actions"><button class="btn secondary" id="cancelComplete" type="button">Review</button><button class="btn primary" id="confirmComplete" type="button">Complete Road Test</button></div></div></dialog>
+<script src="./road-test-data.js"></script><script src="./road-test.js"></script>
+</body></html>
