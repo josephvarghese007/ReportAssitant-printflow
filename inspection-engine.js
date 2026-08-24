@@ -519,6 +519,23 @@
         'Improper Sealing / Gasket'
     ];
 
+    // ── MOBILE KEYBOARD AWARENESS ──
+    if (global.visualViewport) {
+        let initialHeight = global.visualViewport.height;
+        global.visualViewport.addEventListener('resize', () => {
+            if (global.visualViewport.height < initialHeight - 100) {
+                document.body.classList.add('keyboard-open');
+            } else {
+                document.body.classList.remove('keyboard-open');
+            }
+        });
+        global.addEventListener('orientationchange', () => {
+            setTimeout(() => {
+                initialHeight = global.visualViewport.height;
+            }, 150);
+        });
+    }
+
     global.InspectionEngine = {
         escapeHtml,
         formatDuration,
