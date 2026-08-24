@@ -129,6 +129,14 @@ function toggleInspectionInfo() {
     }
 }
 
+function openInspectionInfoIfNeeded() {
+    if (!inspectionInfoOpen) {
+        toggleInspectionInfo();
+    }
+    const sec = document.getElementById('inspectionInfoSection');
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 // ─── LOCAL STORAGE ───
 function saveToLocalStorage() {
     InspectionEngine.safeSetJSON('rt-inspection-items', inspectionItems, () => {
@@ -272,19 +280,34 @@ function renderGroups() {
             const showEvidence = isFail || item.photo || item.remarks;
 
             return `
-                <div class="item-row" id="item-row-${item.id}">
+                <div class="item-row ${item.status === 'FAIL' ? 'item-failed' : (item.status === 'PASS' ? 'item-passed' : '')}" id="item-row-${item.id}">
                     <div class="item-info">
-                        <div class="item-id">${escapeHtml(item.pdc)} · <span style="color:var(--text-secondary)">${escapeHtml(item.sadc || '')}</span></div>
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:2px;">
+                            <div class="item-id">${escapeHtml(item.pdc)} · <span style="color:var(--text-secondary)">${escapeHtml(item.sadc || '')}</span></div>
+                            <span class="item-status-pill ${item.status === 'PASS' ? 'pass' : (item.status === 'FAIL' ? 'fail' : 'pending')}">
+                                ${item.status === 'PASS' ? '✓ Passed' : (item.status === 'FAIL' ? '✗ Failed' : 'Pending')}
+                            </span>
+                        </div>
                         <div class="item-title">${escapeHtml(item.picp)}</div>
                         <div class="item-spec"><i class="fas fa-tachometer-alt" style="font-size:0.75rem;opacity:0.7;"></i> ${escapeHtml(item.spec)}</div>
                         <div class="item-evidence ${showEvidence ? 'visible' : ''}">
+                            <div class="defect-tags-container" style="margin:2px 0 6px 0;">
+                                ${ROAD_TEST_DEFECT_TAGS.slice(0, 5).map(tag =>
+                                    `<button type="button" class="defect-tag-pill" onclick="appendInlineDefectTag(${item.id}, '${escapeHtml(tag)}')">${escapeHtml(tag)}</button>`
+                                ).join('')}
+                            </div>
                             <div class="photo-fail-area">
                                 <label for="photo-${item.id}" title="Capture road test photo">
                                     <i class="fas fa-camera"></i>
                                     <span>${item.photo ? 'Retake Photo' : 'Add Photo'}</span>
                                 </label>
                                 <input type="file" id="photo-${item.id}" accept="image/*" capture="environment" onchange="handlePhoto(${item.id}, this)" />
-                                <img class="photo-preview-fail ${item.photo ? 'visible' : ''}" id="preview-${item.id}" src="${item.photo || ''}" alt="Evidence photo" />
+                                ${item.photo ? `
+                                    <div class="photo-preview-wrap">
+                                        <img class="photo-preview-fail visible" id="preview-${item.id}" src="${item.photo}" alt="Evidence photo" />
+                                        <button type="button" class="btn-remove-photo" title="Remove photo" onclick="removePhoto(${item.id})">&times;</button>
+                                    </div>
+                                ` : ''}
                             </div>
                             <div class="evidence-remarks-wrap">
                                 <textarea class="evidence-remarks" id="remarks-${item.id}" placeholder="Add driving notes, noise RPM, test speed..." oninput="updateRemarks(${item.id}, this.value)">${escapeHtml(item.remarks || '')}</textarea>
@@ -347,15 +370,27 @@ function setStatus(id, targetStatus) {
     const item = inspectionItems.find(i => i.id === id);
     if (!item) return;
 
-    if (targetStatus === 'FAIL' && item.status !== 'FAIL') {
+    if (targetStatus === 'FAIL') {
         openFailModal(item);
         return;
     }
 
     let nextStatus = targetStatus;
-    if (item.status === targetStatus) nextStatus = '';
+    if (item.status === targetStatus) nextStatus = ''; // Toggle off PASS
 
     applyStatus(item, nextStatus);
+}
+
+function clearDefectStatus(id) {
+    const item = inspectionItems.find(i => i.id === id);
+    if (!item) return;
+    
+    // Clear out failure data
+    item.remarks = '';
+    item.photo = null;
+    
+    closeModal();
+    applyStatus(item, '');
 }
 
 function applyStatus(item, status) {
@@ -378,43 +413,56 @@ function applyStatus(item, status) {
 }
 
 function openFailModal(item) {
-    let pendingPhoto = null;
+    let pendingPhoto = item.photo || null;
     const defectTagsHtml = ROAD_TEST_DEFECT_TAGS.map(tag =>
         `<button type="button" class="defect-tag-pill" onclick="appendDefectTag('${escapeHtml(tag)}')">${escapeHtml(tag)}</button>`
     ).join('');
-
+    
+    const isAlreadyFailed = item.status === 'FAIL';
+    
     const modalContent = `
-        <div style="font-size:0.95rem;margin-bottom:8px;">
-            Dynamic Test: <strong>${escapeHtml(item.picp)}</strong> (<span style="font-family:monospace">${escapeHtml(item.pdc)}</span>)
-        </div>
-        <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:10px;">
-            Target Spec: ${escapeHtml(item.spec)}
+        <div style="font-size:0.95rem;margin-bottom:12px;background:var(--surface-alt);padding:10px;border-radius:var(--radius-sm);border:1px solid var(--border);">
+            <div style="font-size:0.75rem;color:var(--text-secondary);text-transform:uppercase;font-weight:700;margin-bottom:2px;">Checkpoint</div>
+            <strong style="color:var(--primary);">${escapeHtml(item.picp)}</strong> 
+            <span style="font-family:monospace;color:var(--text-tertiary);font-size:0.8rem;">(${escapeHtml(item.pdc)})</span>
+            <div style="font-size:0.8rem;color:var(--text-secondary);margin-top:4px;padding-top:4px;border-top:1px dashed var(--border);">
+                <strong>Spec:</strong> ${escapeHtml(item.spec)}
+            </div>
         </div>
 
-        <label style="font-size:0.82rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Quick Road Test Fault:</label>
+        <label style="font-size:0.82rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Quick Defect Category:</label>
         <div class="defect-tags-container" id="modalDefectTags">
             ${defectTagsHtml}
         </div>
 
-        <div style="margin-top:10px;position:relative;">
-            <label for="modalFailRemarks" style="font-size:0.82rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Driving Observations / Fault Details:</label>
-            <div style="position:relative;margin-top:4px;">
-                <textarea id="modalFailRemarks" class="evidence-remarks" style="min-height:75px;" placeholder="Describe speed, gear, RPM, noise frequency or driving symptom...">${escapeHtml(item.remarks || '')}</textarea>
+        <div style="margin-top:14px;position:relative;">
+            <label for="modalFailRemarks" style="font-size:0.82rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Defect Details &amp; Observations:</label>
+            <div style="position:relative;margin-top:6px;">
+                <textarea id="modalFailRemarks" class="evidence-remarks" style="min-height:85px;font-size:0.9rem;" placeholder="Describe the defect or reason for failure...">${escapeHtml(item.remarks || '')}</textarea>
                 <button type="button" class="btn-mic-inline" id="modalMicBtn" title="Voice dictation" onclick="dictateForModal()">
                     <i class="fas fa-microphone"></i>
                 </button>
             </div>
         </div>
 
-        <div style="margin-top:12px;">
-            <label class="photo-fail-area">
-                <label for="modalPhotoInput" style="cursor:pointer;">
-                    <i class="fas fa-camera"></i> Capture Fault Photo / Gauge
+        <div style="margin-top:16px;display:flex;align-items:flex-start;gap:12px;">
+            <label class="photo-fail-area" style="flex:1;text-align:center;padding:16px;background:var(--surface-alt);border:1px dashed var(--border-strong);border-radius:var(--radius-sm);transition:all 0.2s;">
+                <label for="modalPhotoInput" style="cursor:pointer;display:block;color:var(--primary);font-weight:600;">
+                    <i class="fas fa-camera" style="font-size:1.2rem;margin-bottom:6px;display:block;"></i> 
+                    ${pendingPhoto ? 'Change Evidence Photo' : 'Capture Evidence Photo'}
                 </label>
-                <input type="file" id="modalPhotoInput" accept="image/*" capture="environment" />
+                <input type="file" id="modalPhotoInput" accept="image/*" capture="environment" style="display:none;" />
             </label>
-            <img id="modalPhotoPreview" class="photo-preview-fail" style="display:none;margin-top:8px;max-width:180px;height:auto;" alt="Defect preview" />
+            <img id="modalPhotoPreview" class="photo-preview-fail" style="display:${pendingPhoto ? 'block' : 'none'};width:80px;height:80px;object-fit:cover;border-radius:var(--radius-sm);border:1px solid var(--border-strong);box-shadow:var(--shadow-sm);" src="${pendingPhoto || ''}" alt="Defect preview" />
         </div>
+        
+        ${isAlreadyFailed ? `
+        <div style="margin-top:16px;text-align:right;">
+            <button type="button" class="btn-outline" style="color:var(--text-secondary);border-color:var(--border-strong);" onclick="clearDefectStatus(${item.id})">
+                <i class="fas fa-trash-alt"></i> Clear Defect Status
+            </button>
+        </div>
+        ` : ''}
     `;
 
     openModal('Record Driving Defect', modalContent, () => {
@@ -563,11 +611,25 @@ function handlePhoto(id, input) {
         const item = inspectionItems.find(i => i.id === id);
         if (!item) return;
         item.photo = compressedBase64;
+        if (!item.status) {
+            item.status = 'FAIL'; // Default to FAIL when road test photo is captured
+        }
         saveToLocalStorage();
         renderGroups();
-        showToast('📸 Road test evidence attached', 'success');
+        updateStats();
+        showToast(`📸 Photo attached · Status: ${item.status}`, 'success');
         auditLog.push('ATTACH_PHOTO', { id: item.id, pdc: item.pdc });
     });
+}
+
+function removePhoto(id) {
+    const item = inspectionItems.find(i => i.id === id);
+    if (!item) return;
+    item.photo = null;
+    saveToLocalStorage();
+    renderGroups();
+    updateStats();
+    showToast('🗑️ Photo removed', 'info');
 }
 
 function updateRemarks(id, val) {
@@ -575,6 +637,27 @@ function updateRemarks(id, val) {
     if (!item) return;
     item.remarks = val;
     saveToLocalStorage();
+}
+
+function appendInlineDefectTag(id, tag) {
+    const item = inspectionItems.find(i => i.id === id);
+    if (!item) return;
+    if (item.remarks && item.remarks.trim().length > 0) {
+        if (!item.remarks.includes(tag)) {
+            item.remarks = item.remarks.trim() + '; ' + tag;
+        }
+    } else {
+        item.remarks = tag;
+    }
+    if (!item.status) {
+        item.status = 'FAIL';
+    }
+    saveToLocalStorage();
+    renderGroups();
+    updateStats();
+    const textarea = document.getElementById(`remarks-${id}`);
+    if (textarea) textarea.value = item.remarks;
+    showToast(`📝 Fault added: ${tag}`, 'info');
 }
 
 // ─── VOICE DICTATION ───
@@ -733,31 +816,48 @@ function applyManualVin() {
 // ─── PDF PRINT REPORT GENERATION ───
 function exportPDF() {
     saveInspectionMeta();
-    if (!inspectionMeta.inspectionId) {
-        showToast('⚠️ Please ensure inspection info is entered', 'error');
+    if (!inspectionMeta.inspectionId || !inspectionMeta.vin || !inspectionMeta.registration) {
+        showToast('⚠️ Please ensure Test ID, VIN, and Registration are entered', 'error');
+        openInspectionInfoIfNeeded();
         return;
     }
 
     const reportContainer = document.getElementById('printReport');
-    reportContainer.innerHTML = generatePrintReport();
+    if (reportContainer) {
+        reportContainer.innerHTML = generatePrintReport();
+    }
 
-    window.print();
-    showToast('📄 Road Test PDF print dialog launched', 'info');
+    // Wait for all base64 and external images to be decoded before triggering print
+    const images = reportContainer ? Array.from(reportContainer.querySelectorAll('img')) : [];
+    const decodePromises = images.map(img => {
+        if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
+        return img.decode ? img.decode().catch(() => {}) : new Promise(res => { img.onload = img.onerror = res; });
+    });
+
+    Promise.all(decodePromises).then(() => {
+        setTimeout(() => {
+            window.print();
+            showToast('📄 Road Test PDF print dialog launched', 'info');
+        }, 150);
+    });
 }
 
 function generatePrintReport() {
     const allGroups = buildGroups();
     const counters = InspectionEngine.computeCounters(inspectionItems);
-    const failedItems = inspectionItems.filter(i => i.status === 'FAIL');
+    const failedItems = inspectionItems.filter(i => i.status === 'FAIL' || (i.photo && i.status !== 'PASS'));
 
     let finalResult = 'DYNAMIC TEST PASSED';
     let finalResultClass = 'pass';
-    if (counters.failed > 0) {
+    let finalColor = '#10B981';
+    if (counters.failed > 0 || failedItems.length > 0) {
         finalResult = 'DYNAMIC DEFECTS FOUND (REJECTED)';
         finalResultClass = 'fail';
+        finalColor = '#EF4444';
     } else if (counters.pending > 0) {
         finalResult = 'INCOMPLETE ROAD TEST';
         finalResultClass = 'pending';
+        finalColor = '#D97706';
     }
 
     const now = new Date();
@@ -774,12 +874,10 @@ function generatePrintReport() {
     metaItemsHtml += `<div class="report-meta-item"><span>Date &amp; Time:</span><strong>${escapeHtml(inspectionMeta.date || dateStr)} ${timeStr}</strong></div>`;
     if (inspectionMeta.location) metaItemsHtml += `<div class="report-meta-item"><span>Location / Route:</span><strong>${escapeHtml(inspectionMeta.location)}</strong></div>`;
 
-    // Calculate Active Time
-    const timerState = timer.load() || { startedAt: Date.now(), pausedAccumMs: 0 };
-    const totalActiveSecs = Math.floor((Date.now() - timerState.startedAt - (timerState.pausedAccumMs || 0)) / 1000);
-    const activeMins = Math.floor(totalActiveSecs / 60);
-    const activeSecs = totalActiveSecs % 60;
-    metaItemsHtml += `<div class="report-meta-item"><span>Total Active Time:</span><strong>${activeMins}m ${activeSecs}s</strong></div>`;
+    // Accurate Active Duration
+    const totalActiveMs = timer.elapsedMs ? timer.elapsedMs() : 0;
+    const formattedDuration = InspectionEngine.formatDuration(totalActiveMs);
+    metaItemsHtml += `<div class="report-meta-item"><span>Total Active Time:</span><strong>${formattedDuration}</strong></div>`;
 
     let html = `
         <div class="report-page">
@@ -789,7 +887,7 @@ function generatePrintReport() {
                     <h1>BUSTECH ENGINEERING · ROAD TEST REPORT</h1>
                     <p>Dynamic Track &amp; Highway Certification</p>
                 </div>
-                <img src="../bustech-logo.png" alt="BusTech Logo" class="report-logo" style="mix-blend-mode:multiply;"/>
+                <img src="../bustech-logo.png" alt="BusTech Logo" class="report-logo" />
             </div>
 
             <!-- Vehicle & Meta Information -->
@@ -801,8 +899,8 @@ function generatePrintReport() {
             <div class="report-summary-bar">
                 <div class="report-summary-card">Total Checkpoints: <strong>${counters.total}</strong></div>
                 <div class="report-summary-card pass">PASSED: <strong>${counters.passed}</strong></div>
-                <div class="report-summary-card fail">FAILED: <strong>${counters.failed}</strong></div>
-                <div class="report-summary-card">OVERALL: <strong style="color:${finalResultClass === 'pass' ? '#10B981' : '#EF4444'}">${finalResult}</strong></div>
+                <div class="report-summary-card fail">FAILED: <strong>${Math.max(counters.failed, failedItems.length)}</strong></div>
+                <div class="report-summary-card ${finalResultClass}">OVERALL: <strong style="color:${finalColor}">${finalResult}</strong></div>
             </div>
     `;
 
@@ -814,10 +912,11 @@ function generatePrintReport() {
                 <table class="report-table">
                     <thead>
                         <tr>
-                            <th>Code</th>
-                            <th>Assembly</th>
-                            <th>Dynamic Test Point</th>
-                            <th>Driving Observations &amp; Fault Description</th>
+                            <th style="width:16%;">Code</th>
+                            <th style="width:20%;">Assembly</th>
+                            <th style="width:24%;">Dynamic Test Point</th>
+                            <th style="width:26%;">Driving Observations &amp; Fault Description</th>
+                            <th style="width:14%;">Evidence</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -828,7 +927,8 @@ function generatePrintReport() {
                     <td style="font-family:monospace;font-weight:700;">${escapeHtml(f.pdc)}</td>
                     <td>${escapeHtml(f.adc)}</td>
                     <td><strong>${escapeHtml(f.picp)}</strong></td>
-                    <td style="color:#B91C1C;font-weight:600;">${escapeHtml(f.remarks || 'No driving notes recorded')}</td>
+                    <td style="color:#B91C1C;font-weight:600;">${escapeHtml(f.remarks || 'Dynamic fault noted')}</td>
+                    <td>${f.photo ? `<img src="${f.photo}" alt="Fault Evidence" style="width:44px;height:44px;object-fit:cover;border-radius:3px;border:1px solid #CBD5E1;" />` : '<span style="color:#94A3B8;font-size:7pt;">No Photo</span>'}</td>
                 </tr>
             `;
         });
@@ -839,32 +939,35 @@ function generatePrintReport() {
     html += `<div class="report-section-title">Detailed Road Test Checklist</div>`;
     for (const group of allGroups) {
         html += `
-            <div style="margin-bottom:10px;page-break-inside:avoid;">
-                <div style="font-weight:700;font-size:8.5pt;background:#F1F5F9;padding:4px 8px;border:1px solid #CBD5E1;border-bottom:none;">
+            <div class="report-group-container">
+                <div class="report-group-header">
                     ${escapeHtml(group.adc)} (${group.passCount} Pass / ${group.failCount} Fail / ${group.pendCount} Pending)
                 </div>
-                <table class="report-table" style="margin-bottom:8px;">
+                <table class="report-table">
                     <thead>
                         <tr>
-                            <th style="width:18%;">Code</th>
-                            <th style="width:38%;">Dynamic Test Point &amp; Spec</th>
+                            <th style="width:16%;">Code</th>
+                            <th style="width:36%;">Dynamic Test Point &amp; Spec</th>
                             <th style="width:12%;">Method</th>
                             <th style="width:10%;">Status</th>
-                            <th style="width:22%;">Driving Observations</th>
+                            <th style="width:26%;">Driving Observations &amp; Photo</th>
                         </tr>
                     </thead>
                     <tbody>
         `;
         for (const item of group.items) {
-            const st = item.status || 'PENDING';
-            const badgeClass = item.status === 'PASS' ? 'pass' : (item.status === 'FAIL' ? 'fail' : 'pending');
+            const st = item.status || (item.photo ? 'FAIL' : 'PENDING');
+            const badgeClass = st === 'PASS' ? 'pass' : (st === 'FAIL' ? 'fail' : 'pending');
             html += `
                 <tr>
                     <td style="font-family:monospace;">${escapeHtml(item.pdc)}</td>
                     <td><strong>${escapeHtml(item.picp)}</strong><br/><span style="color:#64748B;">Spec: ${escapeHtml(item.spec)}</span></td>
                     <td>${escapeHtml(item.method)}</td>
                     <td><span class="report-badge ${badgeClass}">${st}</span></td>
-                    <td>${escapeHtml(item.remarks || '-')}</td>
+                    <td>
+                        ${escapeHtml(item.remarks || '-')}
+                        ${item.photo ? `<div style="margin-top:3px;"><img src="${item.photo}" alt="Photo" style="width:36px;height:36px;object-fit:cover;border-radius:3px;border:1px solid #CBD5E1;display:inline-block;" /></div>` : ''}
+                    </td>
                 </tr>
             `;
         }
@@ -875,17 +978,19 @@ function generatePrintReport() {
     const itemsWithPhotos = inspectionItems.filter(i => i.photo);
     if (itemsWithPhotos.length > 0) {
         html += `
-            <div class="report-section-title" style="page-break-before:always;">Road Test Photo &amp; Diagnostic Evidence</div>
+            <div class="report-section-title" style="page-break-before:always;break-before:page;">Road Test Photo &amp; Diagnostic Evidence</div>
             <div class="report-evidence-grid">
         `;
         for (const item of itemsWithPhotos) {
+            const itemStatus = item.status || 'FAIL';
+            const badgeClass = itemStatus === 'PASS' ? 'pass' : (itemStatus === 'FAIL' ? 'fail' : 'pending');
             html += `
                 <div class="report-evidence-card">
                     <img src="${item.photo}" alt="Evidence for ${escapeHtml(item.picp)}" />
-                    <div style="font-size:8pt;">
+                    <div style="font-size:7.5pt;">
                         <strong>${escapeHtml(item.pdc)}</strong>: ${escapeHtml(item.picp)}
                         <br/>
-                        <span class="report-badge ${item.status === 'FAIL' ? 'fail' : 'pass'}">${item.status}</span>
+                        <span class="report-badge ${badgeClass}">${itemStatus}</span>
                         ${item.remarks ? `<br/><em>${escapeHtml(item.remarks)}</em>` : ''}
                     </div>
                 </div>
@@ -902,28 +1007,28 @@ function generatePrintReport() {
                     <thead><tr><th>Time</th><th>Action / Event</th></tr></thead>
                     <tbody>`;
         pauseLogs.forEach(log => {
-            html += `<tr><td>${log.timestamp}</td><td>${log.action}</td></tr>`;
+            html += `<tr><td>${escapeHtml(log.timestamp)}</td><td>${escapeHtml(log.action)}</td></tr>`;
         });
         html += `</tbody></table>`;
     }
 
     // Electronic Signatures Block
     html += `
-        <div class="report-signatures" style="display:flex;align-items:flex-end;justify-content:space-between;border-top:2px solid #E2E8F0;padding-top:16px;">
-            <div style="display:flex;gap:40px;">
+        <div class="report-signatures">
+            <div class="report-signatures-group">
                 <div class="report-signature-block">
-                    ${signatures.inspector ? `<img src="${signatures.inspector}" alt="Inspector Signature" />` : '<div style="height:50px;"></div>'}
+                    ${signatures.inspector ? `<img src="${signatures.inspector}" alt="Inspector Signature" />` : '<div style="height:44px;"></div>'}
                     <div><strong>Driver / Inspector Sign-Off:</strong> ${escapeHtml(inspectionMeta.inspector || 'Certified Inspector')}</div>
-                    <div style="font-size:7.5pt;color:#64748B;">I hereby certify that all dynamic checkpoints have been individually evaluated.</div>
+                    <div style="font-size:7pt;color:#64748B;">I hereby certify that all dynamic checkpoints have been individually evaluated.</div>
                 </div>
                 <div class="report-signature-block">
-                    ${signatures.supervisor ? `<img src="${signatures.supervisor}" alt="Supervisor Signature" />` : '<div style="height:50px;"></div>'}
+                    ${signatures.supervisor ? `<img src="${signatures.supervisor}" alt="Supervisor Signature" />` : '<div style="height:44px;"></div>'}
                     <div><strong>Quality Assurance / Supervisor:</strong> Authorized Signatory</div>
-                    <div style="font-size:7.5pt;color:#64748B;">Road test report verified and archived in quality audit records.</div>
+                    <div style="font-size:7pt;color:#64748B;">Road test report verified and archived in quality audit records.</div>
                 </div>
             </div>
             <div class="report-signature-brand">
-                <img src="../bustech-logo.png" alt="BusTech Engineering" style="height:50px;mix-blend-mode:multiply;" />
+                <img src="../bustech-logo.png" alt="BusTech Engineering" class="report-logo" />
             </div>
         </div>
     `;
@@ -931,6 +1036,15 @@ function generatePrintReport() {
     html += `</div>`;
     return html;
 }
+
+// Seamless native print hooks (Ctrl+P / Cmd+P)
+window.addEventListener('beforeprint', () => {
+    saveInspectionMeta();
+    const reportContainer = document.getElementById('printReport');
+    if (reportContainer) {
+        reportContainer.innerHTML = generatePrintReport();
+    }
+});
 
 // ─── EVENTS ───
 function setupEventListeners() {
@@ -988,8 +1102,9 @@ function openModal(title, message, onConfirm, options = {}) {
     cancelBtn.textContent = options.cancelText || 'Cancel';
 
     confirmBtn.onclick = () => {
+        const cb = modalCallback;
+        if (cb) cb();
         closeModal();
-        if (modalCallback) modalCallback();
     };
     cancelBtn.onclick = () => {
         closeModal();
@@ -1070,5 +1185,10 @@ function resetTimer() {
     if (controlBtn) controlBtn.innerHTML = '<i class="fas fa-pause"></i>';
 }
 
-// ─── START ───
-document.addEventListener('DOMContentLoaded', init);
+window.addEventListener('load', () => {
+    if (window.requestIdleCallback) {
+        requestIdleCallback(init);
+    } else {
+        setTimeout(init, 1);
+    }
+});
