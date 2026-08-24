@@ -35,7 +35,8 @@ jobs:
       - name: Prepare Static Site Artifact
         run: |
           mkdir _site
-          cp index.html style.css script.js manifest.json service-worker.js _site/
+          cp index.html style.css manifest.json service-worker.js inspection-engine.js bustech-logo.png _site/
+          cp -R static-pdi road-test _site/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
